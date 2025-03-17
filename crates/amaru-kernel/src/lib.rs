@@ -33,6 +33,7 @@ pub use pallas_crypto::{
     hash::{Hash, Hasher},
     key::ed25519::{PublicKey, Signature},
 };
+use pallas_primitives::conway::ProposalProcedure;
 pub use pallas_primitives::{
     // TODO: Shouldn't re-export alonzo, but prefer exporting unqualified identifiers directly.
     // Investigate.
@@ -40,11 +41,11 @@ pub use pallas_primitives::{
     babbage::{Header, MintedHeader},
     conway::{
         AddrKeyhash, Anchor, AuxiliaryData, Block, BootstrapWitness, Certificate, Coin, DRep,
-        Epoch, ExUnits, GovActionId, HeaderBody, KeepRaw, MintedBlock, MintedTransactionBody,
-        MintedTransactionOutput, MintedWitnessSet, NonEmptySet, PoolMetadata,
-        PseudoTransactionOutput, RationalNumber, Redeemers, Relay, RewardAccount, StakeCredential,
-        TransactionBody, TransactionInput, TransactionOutput, UnitInterval, VKeyWitness, Value,
-        Voter, VotingProcedure, VotingProcedures, VrfKeyhash, WitnessSet,
+        Epoch, ExUnits, GovAction, GovActionId, HeaderBody, KeepRaw, MintedBlock,
+        MintedTransactionBody, MintedTransactionOutput, MintedWitnessSet, NonEmptySet,
+        PoolMetadata, PseudoTransactionOutput, RationalNumber, Redeemers, Relay, RewardAccount,
+        StakeCredential, TransactionBody, TransactionInput, TransactionOutput, UnitInterval,
+        VKeyWitness, Value, Voter, VotingProcedure, VotingProcedures, VrfKeyhash, WitnessSet,
     },
 };
 use std::{convert::Infallible, sync::LazyLock};
@@ -582,6 +583,137 @@ impl HasKeyHash for Address {
                 StakePayload::Stake(hash) => Some(*hash),
                 StakePayload::Script(_) => None,
             },
+        }
+    }
+}
+
+pub trait HasScriptHash {
+    fn script_hash(&self) -> Option<Hash<28>>;
+}
+
+impl HasScriptHash for StakeCredential {
+    fn script_hash(&self) -> Option<Hash<28>> {
+        match self {
+            StakeCredential::ScriptHash(hash) => Some(*hash),
+            StakeCredential::AddrKeyhash(_) => None,
+        }
+    }
+}
+
+impl HasScriptHash for Address {
+    fn script_hash(&self) -> Option<Hash<28>> {
+        match self {
+            Address::Shelley(shelley_address) => {
+                let payment = shelley_address.payment();
+                if payment.is_script() {
+                    Some(*payment.as_hash())
+                } else {
+                    None
+                }
+            }
+            Address::Byron(_) => None,
+            Address::Stake(stake_address) => match stake_address.payload() {
+                StakePayload::Stake(_) => None,
+                StakePayload::Script(hash) => Some(hash.clone()),
+            },
+        }
+    }
+}
+
+impl HasScriptHash for Voter {
+    fn script_hash(&self) -> Option<Hash<28>> {
+        match self {
+            Voter::ConstitutionalCommitteeKey(_) => None,
+            Voter::ConstitutionalCommitteeScript(hash) => Some(*hash),
+            Voter::DRepKey(_) => None,
+            Voter::DRepScript(hash) => Some(*hash),
+            Voter::StakePoolKey(_) => None,
+        }
+    }
+}
+
+pub trait RequiresScript {
+    /// `RequiresScript for T` determines if `T` requires a script during validation
+    fn requires_script(&self) -> Option<Hash<28>>;
+}
+
+impl RequiresScript for TransactionOutput {
+    fn requires_script(&self) -> Option<Hash<28>> {
+        // If the address is poorly formed, we are saying it doesn't need a script
+        // I would argue we shouldn't ever need to call this *unless* address is well formed
+        self.address().ok()?.script_hash()
+    }
+}
+
+impl RequiresScript for (Bytes, u64) {
+    fn requires_script(&self) -> Option<Hash<28>> {
+        // The first four bits of the reward account are 1110 for a key hash and 1111 for a script hash
+        if self.0[0] & 0b00010000 != 0 {
+            Some(Hash::from(&self.0[1..29]))
+        } else {
+            None
+        }
+    }
+}
+
+impl RequiresScript for Certificate {
+    fn requires_script(&self) -> Option<Hash<28>> {
+        match self {
+            Certificate::StakeRegistration(_) => None,
+            Certificate::StakeDeregistration(stake_credential) => stake_credential.script_hash(),
+            Certificate::StakeDelegation(stake_credential, _) => stake_credential.script_hash(),
+            Certificate::PoolRegistration {
+                operator: _,
+                vrf_keyhash: _,
+                pledge: _,
+                cost: _,
+                margin: _,
+                reward_account: _,
+                pool_owners: _,
+                relays: _,
+                pool_metadata: _,
+            } => None,
+            Certificate::PoolRetirement(_, _) => None,
+            Certificate::Reg(stake_credential, coin) => {
+                if coin == &0 {
+                    None
+                } else {
+                    stake_credential.script_hash()
+                }
+            }
+            Certificate::UnReg(stake_credential, _) => stake_credential.script_hash(),
+            Certificate::VoteDeleg(stake_credential, _) => stake_credential.script_hash(),
+            Certificate::StakeVoteDeleg(stake_credential, _, _) => stake_credential.script_hash(),
+            Certificate::StakeRegDeleg(stake_credential, _, _) => stake_credential.script_hash(),
+            Certificate::VoteRegDeleg(stake_credential, _, _) => stake_credential.script_hash(),
+            Certificate::StakeVoteRegDeleg(stake_credential, _, _, _) => {
+                stake_credential.script_hash()
+            }
+            Certificate::AuthCommitteeHot(cold_credential, _) => cold_credential.script_hash(),
+            Certificate::ResignCommitteeCold(stake_credential, _) => stake_credential.script_hash(),
+            Certificate::RegDRepCert(stake_credential, _, _) => stake_credential.script_hash(),
+            Certificate::UnRegDRepCert(stake_credential, _) => stake_credential.script_hash(),
+            Certificate::UpdateDRepCert(stake_credential, _) => stake_credential.script_hash(),
+        }
+    }
+}
+
+impl RequiresScript for ProposalProcedure {
+    fn requires_script(&self) -> Option<Hash<28>> {
+        match &self.gov_action {
+            GovAction::ParameterChange(_, _, maybe_policy_hash) => match maybe_policy_hash {
+                Nullable::Some(hash) => Some(*hash),
+                _ => None,
+            },
+            GovAction::TreasuryWithdrawals(_, maybe_policy_hash) => match maybe_policy_hash {
+                Nullable::Some(hash) => Some(*hash),
+                _ => None,
+            },
+            GovAction::HardForkInitiation(_, _) => None,
+            GovAction::NoConfidence(_) => None,
+            GovAction::UpdateCommittee(_, _, _, _) => None,
+            GovAction::NewConstitution(_, _) => None,
+            GovAction::Information => None,
         }
     }
 }
