@@ -21,3 +21,4 @@ pub type Value = TransactionOutput;
 
 /// Iterator used to browse rows from the Pools column. Meant to be referenced using qualified imports.
 pub type Iter<'a, 'b> = IterBorrow<'a, 'b, Key, Option<Value>>;
+pub type IterRef<'a> = std::collections::btree_map::Iter<'a, Key, Value>;
