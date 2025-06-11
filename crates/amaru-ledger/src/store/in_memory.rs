@@ -1,15 +1,31 @@
 use crate::{
     store::{
-        EpochTransitionProgress, HistoricalStores, ReadOnlyStore, Snapshot, Store, StoreError,
-        TransactionalContext,
+        columns::accounts::Row, EpochTransitionProgress, HistoricalStores, ReadOnlyStore, Snapshot,
+        Store, StoreError, TransactionalContext,
     },
     summary::Pots,
 };
-use amaru_kernel::{protocol_parameters::ProtocolParameters, Lovelace, Point, StakeCredential};
-use slot_arithmetic::Epoch;
-use std::collections::BTreeSet;
+use amaru_kernel::{
+    protocol_parameters::ProtocolParameters, Lovelace, Point, StakeCredential, TransactionInput,
+    TransactionOutput,
+};
 
-pub struct MemoryStore {}
+use slot_arithmetic::Epoch;
+use std::collections::{BTreeSet, HashMap};
+
+pub struct MemoryStore {
+    utxos: HashMap<TransactionInput, TransactionOutput>,
+    accounts: HashMap<StakeCredential, Row>,
+}
+
+impl MemoryStore {
+    pub fn new() -> Self {
+        Self {
+            utxos: HashMap::new(),
+            accounts: HashMap::new(),
+        }
+    }
+}
 
 impl Snapshot for MemoryStore {
     fn epoch(&self) -> Epoch {
@@ -27,9 +43,9 @@ impl ReadOnlyStore for MemoryStore {
 
     fn account(
         &self,
-        _credential: &amaru_kernel::StakeCredential,
+        credential: &amaru_kernel::StakeCredential,
     ) -> Result<Option<crate::store::columns::accounts::Row>, crate::store::StoreError> {
-        Ok(None)
+        Ok(self.accounts.get(credential).cloned())
     }
 
     fn pool(
@@ -41,9 +57,9 @@ impl ReadOnlyStore for MemoryStore {
 
     fn utxo(
         &self,
-        _input: &amaru_kernel::TransactionInput,
+        input: &amaru_kernel::TransactionInput,
     ) -> Result<Option<amaru_kernel::TransactionOutput>, crate::store::StoreError> {
-        Ok(None)
+        Ok(self.utxos.get(input).cloned())
     }
 
     fn pots(&self) -> Result<crate::summary::Pots, crate::store::StoreError> {
@@ -292,6 +308,76 @@ impl Store for MemoryStore {
 
 impl HistoricalStores for MemoryStore {
     fn for_epoch(&self, _epoch: Epoch) -> Result<impl Snapshot, crate::store::StoreError> {
-        Ok(MemoryStore {})
+        Ok(MemoryStore {
+            utxos: HashMap::new(),
+            accounts: HashMap::new(),
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use amaru_kernel::Bytes;
+    use amaru_kernel::{
+        Hash, PostAlonzoTransactionOutput, PseudoTransactionOutput, TransactionInput, Value,
+    };
+
+    fn dummy_post_alonzo_output() -> PostAlonzoTransactionOutput {
+        PostAlonzoTransactionOutput {
+            address: Bytes::from(vec![0u8; 32]),
+            value: Value::Coin(0),
+            datum_option: None,
+            script_ref: None,
+        }
+    }
+
+    fn dummy_row() -> Row {
+        Row {
+            delegatee: None,
+            deposit: 1000,
+            drep: None,
+            rewards: 500,
+        }
+    }
+
+    #[test]
+    fn test_utxo_returns_dummy_output() {
+        let mut store = MemoryStore::new();
+
+        let txin = TransactionInput {
+            transaction_id: Hash::new([0u8; 32]),
+            index: 0,
+        };
+
+        let output = PseudoTransactionOutput::PostAlonzo(dummy_post_alonzo_output());
+
+        store.utxos.insert(txin.clone(), output);
+
+        let result = store.utxo(&txin).unwrap();
+
+        println!("UTXO result: {:?}", result);
+
+        assert!(result.is_some(), "UTXO should be found");
+    }
+
+    #[test]
+    fn test_account_returns_correct_row() {
+        let mut store = MemoryStore::new();
+
+        let key_bytes = [0u8; 28];
+        let addr_keyhash = Hash::new(key_bytes);
+
+        let credential = StakeCredential::AddrKeyhash(addr_keyhash);
+
+        store.accounts.insert(credential.clone(), dummy_row());
+
+        let result = store.account(&credential).unwrap();
+
+        assert!(result.is_some());
+
+        let row = result.unwrap();
+        assert_eq!(row.deposit, 1000);
+        assert_eq!(row.rewards, 500);
     }
 }
