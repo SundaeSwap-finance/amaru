@@ -85,7 +85,7 @@ pub trait ReadOnlyStore {
     fn pots(&self) -> Result<Pots, StoreError>;
 
     /// Get details about all utxos
-    fn iter_utxos(&self) -> Result<impl Iterator<Item = (&utxo::Key, &utxo::Value)>, StoreError>;
+    fn iter_utxos(&self) -> Result<impl Iterator<Item = (utxo::Key, utxo::Value)>, StoreError>;
 
     /// Get details about all slot leaders
     fn iter_block_issuers(
