@@ -1,5 +1,5 @@
 use crate::store::{
-    columns::{accounts, pools, pots, slots, utxo::IterRef},
+    columns::{accounts, dreps, pools, pots, slots},
     EpochTransitionProgress, HistoricalStores, ReadOnlyStore, Snapshot, Store, StoreError,
     TransactionalContext,
 };
@@ -18,6 +18,7 @@ pub struct MemoryStore {
     pools: HashMap<PoolId, pools::Row>,
     pots: pots::Row,
     slots: BTreeMap<Slot, slots::Row>,
+    dreps: HashMap<StakeCredential, dreps::Row>,
 }
 
 impl MemoryStore {
@@ -28,6 +29,7 @@ impl MemoryStore {
             pools: HashMap::new(),
             pots: pots::Row::default(),
             slots: BTreeMap::new(),
+            dreps: HashMap::new(),
         }
     }
 }
@@ -72,8 +74,21 @@ impl ReadOnlyStore for MemoryStore {
     }
 
     #[allow(refining_impl_trait)]
-    fn iter_utxos(&self) -> Result<IterRef<'_>, StoreError> {
-        Ok(self.utxos.iter())
+    fn iter_utxos(
+        &self,
+    ) -> Result<
+        std::vec::IntoIter<(
+            crate::store::columns::utxo::Key,
+            crate::store::columns::utxo::Value,
+        )>,
+        crate::store::StoreError,
+    > {
+        let utxo_vec: Vec<_> = self
+            .utxos
+            .iter()
+            .map(|(tx_input, tx_output)| (tx_input.clone(), tx_output.clone()))
+            .collect::<Vec<_>>();
+        Ok(utxo_vec.into_iter())
     }
 
     #[allow(refining_impl_trait)]
@@ -107,7 +122,7 @@ impl ReadOnlyStore for MemoryStore {
         let pool_vec: Vec<_> = self
             .pools
             .iter()
-            .map(|(key, row)| (key.clone(), row.clone()))
+            .map(|(pool_id, row)| (pool_id.clone(), row.clone()))
             .collect();
         Ok(pool_vec.into_iter())
     }
@@ -122,7 +137,12 @@ impl ReadOnlyStore for MemoryStore {
         )>,
         crate::store::StoreError,
     > {
-        Ok(vec![].into_iter())
+        let accounts_vec: Vec<_> = self
+            .accounts
+            .iter()
+            .map(|(stake_credential, row)| (stake_credential.clone(), row.clone()))
+            .collect();
+        Ok(accounts_vec.into_iter())
     }
 
     #[allow(refining_impl_trait)]
@@ -135,7 +155,12 @@ impl ReadOnlyStore for MemoryStore {
         )>,
         crate::store::StoreError,
     > {
-        Ok(vec![].into_iter())
+        let dreps_vec: Vec<_> = self
+            .dreps
+            .iter()
+            .map(|(stake_credential, row)| (stake_credential.clone(), row.clone()))
+            .collect();
+        Ok(dreps_vec.into_iter())
     }
 
     #[allow(refining_impl_trait)]
@@ -317,16 +342,17 @@ impl HistoricalStores for MemoryStore {
             pools: HashMap::new(),
             pots: pots::Row::default(),
             slots: BTreeMap::new(),
+            dreps: HashMap::new(),
         })
     }
 }
 
 #[cfg(test)]
-mod tests {
+mod in_memory_tests {
     use super::*;
-    use amaru_kernel::Bytes;
     use amaru_kernel::{
-        Hash, PostAlonzoTransactionOutput, PseudoTransactionOutput, TransactionInput, Value,
+        Bytes, CertificatePointer, Hash, Nullable, PostAlonzoTransactionOutput,
+        PseudoTransactionOutput, TransactionInput, TransactionPointer, Value,
     };
 
     fn dummy_post_alonzo_output() -> PostAlonzoTransactionOutput {
@@ -344,6 +370,15 @@ mod tests {
             deposit: 1000,
             drep: None,
             rewards: 500,
+        }
+    }
+
+    fn dummy_account_row2() -> accounts::Row {
+        accounts::Row {
+            delegatee: None,
+            deposit: 3000,
+            drep: None,
+            rewards: 200,
         }
     }
 
@@ -378,6 +413,46 @@ mod tests {
         }
     }
 
+    fn dummy_stake_credential() -> StakeCredential {
+        StakeCredential::AddrKeyhash(Hash::new([0u8; 28]))
+    }
+
+    fn dummy_stake_credential2() -> StakeCredential {
+        StakeCredential::AddrKeyhash(Hash::new([1u8; 28]))
+    }
+
+    fn dummy_drep_row() -> dreps::Row {
+        dreps::Row {
+            deposit: 500000000,
+            anchor: None,
+            registered_at: CertificatePointer {
+                transaction: TransactionPointer {
+                    slot: 100u64.into(),
+                    transaction_index: 1,
+                },
+                certificate_index: 0,
+            },
+            last_interaction: None,
+            previous_deregistration: None,
+        }
+    }
+
+    fn dummy_drep_row2() -> dreps::Row {
+        dreps::Row {
+            deposit: 600000000,
+            anchor: None,
+            registered_at: CertificatePointer {
+                transaction: TransactionPointer {
+                    slot: 40u64.into(),
+                    transaction_index: 5,
+                },
+                certificate_index: 1,
+            },
+            last_interaction: None,
+            previous_deregistration: None,
+        }
+    }
+
     #[test]
     fn test_utxo_returns_dummy_output() {
         let mut store = MemoryStore::new();
@@ -393,8 +468,6 @@ mod tests {
 
         let result = store.utxo(&txin).unwrap();
 
-        println!("UTXO result: {:?}", result);
-
         assert!(result.is_some(), "UTXO should be found");
     }
 
@@ -402,10 +475,7 @@ mod tests {
     fn test_account_returns_correct_row() {
         let mut store = MemoryStore::new();
 
-        let key_bytes = [0u8; 28];
-        let addr_keyhash = Hash::new(key_bytes);
-
-        let credential = StakeCredential::AddrKeyhash(addr_keyhash);
+        let credential = dummy_stake_credential();
 
         store
             .accounts
@@ -422,7 +492,6 @@ mod tests {
 
     #[test]
     fn test_pool_returns_correct_row() {
-        use amaru_kernel::Nullable;
         let mut store = MemoryStore::new();
 
         let pool_id = Hash::new([0u8; 28]);
@@ -459,7 +528,7 @@ mod tests {
     }
 
     #[test]
-    fn iter_utxos_returns_inserted_utxos() {
+    fn test_iter_utxos_returns_inserted_utxos() {
         let mut store = MemoryStore::new();
 
         let txin1 = TransactionInput {
@@ -477,37 +546,57 @@ mod tests {
         store.utxos.insert(txin1.clone(), output1.clone());
         store.utxos.insert(txin2.clone(), output2.clone());
 
-        // iter_utxos now returns references, so results will be Vec<(&TransactionInput, &PseudoTransactionOutput)>
         let results = store.iter_utxos().unwrap().collect::<Vec<_>>();
 
         assert_eq!(results.len(), 2);
 
-        // Compare with references using ref pattern or & syntax
-        assert_eq!(results[0], (&txin1, &output1));
-        assert_eq!(results[1], (&txin2, &output2));
+        assert_eq!(results[0], (txin1.clone(), output1.clone()));
+        assert_eq!(results[1], (txin2.clone(), output2.clone()));
     }
 
     #[test]
-    fn iter_block_issuers_returns_inserted_slots() {
+    fn test_iter_accounts_returns_inserted_accounts() {
         let mut store = MemoryStore::new();
 
-        let slot1 = Slot::from(1u64);
-        let slot2 = Slot::from(2u64);
+        let stake_credential1 = dummy_stake_credential();
+        let stake_credential2 = dummy_stake_credential2();
+        let row1 = dummy_account_row();
+        let row2 = dummy_account_row2();
 
-        let pool_id1 = Hash::new([2u8; 28]);
-        let pool_id2 = Hash::new([2u8; 28]);
+        store
+            .accounts
+            .insert(stake_credential1.clone(), row1.clone());
+        store
+            .accounts
+            .insert(stake_credential2.clone(), row2.clone());
 
-        let row1 = slots::Row::new(pool_id1);
-        let row2 = slots::Row::new(pool_id2);
+        let mut results = store.iter_accounts().unwrap().collect::<Vec<_>>();
+        results.sort_by_key(|(k, _)| k.clone());
 
-        store.slots.insert(slot1, row1.clone());
-        store.slots.insert(slot2, row2.clone());
+        let mut expected = vec![(stake_credential1, row1), (stake_credential2, row2)];
+        expected.sort_by_key(|(k, _)| k.clone());
 
-        let results = store.iter_block_issuers().unwrap().collect::<Vec<_>>();
+        assert_eq!(results, expected);
+    }
 
-        assert_eq!(results.len(), 2);
+    #[test]
+    fn test_iter_dreps_returns_inserted_dreps() {
+        let mut store = MemoryStore::new();
 
-        assert_eq!(results[0], (Slot::from(1u64), row1));
-        assert_eq!(results[1], (Slot::from(2u64), row2));
+        let stake_credential1 = dummy_stake_credential();
+        let stake_credential2 = dummy_stake_credential2();
+        let row1 = dummy_drep_row();
+        let row2 = dummy_drep_row2();
+
+        store.dreps.insert(stake_credential1.clone(), row1.clone());
+        store.dreps.insert(stake_credential2.clone(), row2.clone());
+
+        let mut results = store.iter_dreps().unwrap().collect::<Vec<_>>();
+        results.sort_by_key(|(k, _)| k.clone());
+
+        let mut expected = vec![(stake_credential1, row1), (stake_credential2, row2)];
+        expected.sort_by_key(|(k, _)| k.clone());
+
+        assert_eq!(results, expected);
     }
 }
