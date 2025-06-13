@@ -1,9 +1,5 @@
 use crate::store::{
-    columns::{
-        accounts, dreps, pools,
-        pots::{self, Row},
-        proposals, slots,
-    },
+    columns::{accounts, dreps, pools, pots, proposals, slots},
     EpochTransitionProgress, HistoricalStores, ReadOnlyStore, Snapshot, Store, StoreError,
     TransactionalContext,
 };
@@ -12,7 +8,6 @@ use amaru_kernel::{
     StakeCredential, TransactionInput, TransactionOutput,
 };
 
-use iter_borrow::borrowable_proxy::BorrowableProxy;
 use slot_arithmetic::Epoch;
 use std::{
     borrow::{Borrow, BorrowMut},
@@ -25,81 +20,25 @@ use std::{
     collections::{BTreeSet, HashMap},
 };
 
-pub struct BorrowMutAdapter<'a, F>
-where
-    F: FnOnce(RefMut<'a, Row>),
-{
-    inner: BorrowableProxy<RefMut<'a, Row>, F>,
+pub struct RefMutAdapter<'a, T> {
+    inner: RefMut<'a, T>,
 }
 
-impl<'a, F> BorrowMutAdapter<'a, F>
-where
-    F: FnOnce(RefMut<'a, Row>),
-{
-    pub fn new(inner: BorrowableProxy<RefMut<'a, Row>, F>) -> Self {
+impl<'a, T> RefMutAdapter<'a, T> {
+    pub fn new(inner: RefMut<'a, T>) -> Self {
         Self { inner }
     }
 }
 
-impl<'a, F> Borrow<Row> for BorrowMutAdapter<'a, F>
-where
-    F: FnOnce(RefMut<'a, Row>),
-{
-    fn borrow(&self) -> &Row {
-        // Fully qualify the borrow method to help type inference
-        <BorrowableProxy<RefMut<'a, Row>, F> as Borrow<RefMut<'a, Row>>>::borrow(&self.inner)
-            .deref()
+impl<'a, T> Borrow<T> for RefMutAdapter<'a, T> {
+    fn borrow(&self) -> &T {
+        self.inner.deref()
     }
 }
 
-impl<'a, F> BorrowMut<Row> for BorrowMutAdapter<'a, F>
-where
-    F: FnOnce(RefMut<'a, Row>),
-{
-    fn borrow_mut(&mut self) -> &mut Row {
-        <BorrowableProxy<RefMut<'a, Row>, F> as BorrowMut<RefMut<'a, Row>>>::borrow_mut(
-            &mut self.inner,
-        )
-        .deref_mut()
-    }
-}
-
-// ProxyAdapter wrapper around BorrowableProxy, similar to BorrowMutAdapter
-pub struct ProxyAdapter<'a, F>
-where
-    F: FnOnce(RefMut<'a, Row>),
-{
-    inner: BorrowableProxy<RefMut<'a, Row>, F>,
-}
-
-impl<'a, F> ProxyAdapter<'a, F>
-where
-    F: FnOnce(RefMut<'a, Row>),
-{
-    pub fn new(inner: BorrowableProxy<RefMut<'a, Row>, F>) -> Self {
-        Self { inner }
-    }
-}
-
-impl<'a, F> Borrow<Row> for ProxyAdapter<'a, F>
-where
-    F: FnOnce(RefMut<'a, Row>),
-{
-    fn borrow(&self) -> &Row {
-        <BorrowableProxy<RefMut<'a, Row>, F> as Borrow<RefMut<'a, Row>>>::borrow(&self.inner)
-            .deref()
-    }
-}
-
-impl<'a, F> BorrowMut<Row> for ProxyAdapter<'a, F>
-where
-    F: FnOnce(RefMut<'a, Row>),
-{
-    fn borrow_mut(&mut self) -> &mut Row {
-        <BorrowableProxy<RefMut<'a, Row>, F> as BorrowMut<RefMut<'a, Row>>>::borrow_mut(
-            &mut self.inner,
-        )
-        .deref_mut()
+impl<'a, T> BorrowMut<T> for RefMutAdapter<'a, T> {
+    fn borrow_mut(&mut self) -> &mut T {
+        self.inner.deref_mut()
     }
 }
 
@@ -389,15 +328,7 @@ impl<'a> TransactionalContext<'a> for MemoryTransactionalContext<'a> {
         &self,
         mut with: impl FnMut(Box<dyn BorrowMut<pots::Row> + 'a>),
     ) -> Result<(), StoreError> {
-        let pots_ref: RefMut<'a, pots::Row> = self.store.pots.borrow_mut();
-
-        let proxy = BorrowableProxy::new(pots_ref, |pots| {
-            let _ = pots;
-        });
-
-        let adapter = ProxyAdapter::new(proxy);
-
-        with(Box::new(adapter));
+        with(Box::new(RefMutAdapter::new(self.store.pots.borrow_mut())));
 
         Ok(())
     }
