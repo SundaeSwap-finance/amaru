@@ -1,11 +1,11 @@
 use crate::store::{
-    columns::{accounts, dreps, pools, pots, proposals, slots},
+    columns::{accounts, dreps, pools, pots, proposals, slots, utxo},
     EpochTransitionProgress, HistoricalStores, ReadOnlyStore, Snapshot, Store, StoreError,
     TransactionalContext,
 };
 use amaru_kernel::{
     protocol_parameters::ProtocolParameters, Lovelace, Point, PoolId, ProposalId, Slot,
-    StakeCredential, TransactionInput, TransactionOutput,
+    StakeCredential, TransactionInput,
 };
 
 use slot_arithmetic::Epoch;
@@ -42,27 +42,63 @@ impl<'a, T> BorrowMut<T> for RefMutAdapter<'a, T> {
     }
 }
 
+pub struct OwnedOptionWrapper(Option<pools::Row>);
+
+impl Borrow<Option<pools::Row>> for OwnedOptionWrapper {
+    fn borrow(&self) -> &Option<pools::Row> {
+        &self.0
+    }
+}
+
+impl BorrowMut<Option<pools::Row>> for OwnedOptionWrapper {
+    fn borrow_mut(&mut self) -> &mut Option<pools::Row> {
+        &mut self.0
+    }
+}
+
+pub struct RefMutAdapterMut<'a, T> {
+    inner: &'a mut T,
+}
+
+impl<'a, T> RefMutAdapterMut<'a, T> {
+    pub fn new(inner: &'a mut T) -> Self {
+        Self { inner }
+    }
+}
+
+impl<'a, T> Borrow<T> for RefMutAdapterMut<'a, T> {
+    fn borrow(&self) -> &T {
+        self.inner
+    }
+}
+
+impl<'a, T> BorrowMut<T> for RefMutAdapterMut<'a, T> {
+    fn borrow_mut(&mut self) -> &mut T {
+        self.inner
+    }
+}
+
 pub struct MemoryStore {
-    utxos: BTreeMap<TransactionInput, TransactionOutput>,
-    accounts: HashMap<StakeCredential, accounts::Row>,
-    pools: HashMap<PoolId, pools::Row>,
+    utxos: RefCell<BTreeMap<TransactionInput, Option<utxo::Value>>>,
+    accounts: RefCell<HashMap<StakeCredential, Option<accounts::Row>>>,
+    pools: RefCell<HashMap<PoolId, Option<pools::Row>>>,
     pots: RefCell<pots::Row>,
-    slots: BTreeMap<Slot, slots::Row>,
-    dreps: HashMap<StakeCredential, dreps::Row>,
-    proposals: HashMap<ProposalId, proposals::Row>,
+    slots: RefCell<BTreeMap<Slot, Option<slots::Row>>>,
+    dreps: RefCell<HashMap<StakeCredential, Option<dreps::Row>>>,
+    proposals: RefCell<BTreeMap<ProposalId, Option<proposals::Row>>>,
     p_params: RefCell<BTreeMap<Epoch, ProtocolParameters>>,
 }
 
 impl MemoryStore {
     pub fn new() -> Self {
         Self {
-            utxos: BTreeMap::new(),
-            accounts: HashMap::new(),
-            pools: HashMap::new(),
+            utxos: RefCell::new(BTreeMap::new()),
+            accounts: RefCell::new(HashMap::<StakeCredential, Option<accounts::Row>>::new()),
+            pools: RefCell::new(HashMap::<PoolId, Option<pools::Row>>::new()),
             pots: RefCell::new(pots::Row::default()),
-            slots: BTreeMap::new(),
-            dreps: HashMap::new(),
-            proposals: HashMap::new(),
+            slots: RefCell::new(BTreeMap::new()),
+            dreps: RefCell::new(HashMap::<StakeCredential, Option<dreps::Row>>::new()),
+            proposals: RefCell::new(BTreeMap::<ProposalId, Option<proposals::Row>>::new()),
             p_params: RefCell::new(BTreeMap::new()),
         }
     }
@@ -84,21 +120,25 @@ impl ReadOnlyStore for MemoryStore {
         &self,
         credential: &amaru_kernel::StakeCredential,
     ) -> Result<Option<crate::store::columns::accounts::Row>, crate::store::StoreError> {
-        Ok(self.accounts.get(credential).cloned())
+        Ok(self
+            .accounts
+            .borrow()
+            .get(credential)
+            .and_then(|opt| opt.clone()))
     }
 
     fn pool(
         &self,
         pool: &amaru_kernel::PoolId,
     ) -> Result<Option<crate::store::columns::pools::Row>, crate::store::StoreError> {
-        Ok(self.pools.get(pool).cloned())
+        Ok(self.pools.borrow().get(pool).and_then(|opt| opt.clone()))
     }
 
     fn utxo(
         &self,
         input: &amaru_kernel::TransactionInput,
     ) -> Result<Option<amaru_kernel::TransactionOutput>, crate::store::StoreError> {
-        Ok(self.utxos.get(input).cloned())
+        Ok(self.utxos.borrow().get(input).and_then(|opt| opt.clone()))
     }
 
     fn pots(&self) -> Result<crate::summary::Pots, crate::store::StoreError> {
@@ -119,9 +159,14 @@ impl ReadOnlyStore for MemoryStore {
     > {
         let utxo_vec: Vec<_> = self
             .utxos
+            .borrow()
             .iter()
-            .map(|(tx_input, tx_output)| (tx_input.clone(), tx_output.clone()))
-            .collect::<Vec<_>>();
+            .filter_map(|(tx_input, opt_tx_output)| {
+                opt_tx_output
+                    .as_ref()
+                    .map(|tx_output| (tx_input.clone(), tx_output.clone()))
+            })
+            .collect();
         Ok(utxo_vec.into_iter())
     }
 
@@ -139,9 +184,11 @@ impl ReadOnlyStore for MemoryStore {
     > {
         let block_issuer_vec: Vec<_> = self
             .slots
+            .borrow()
             .iter()
-            .map(|(slot, row)| (slot.clone(), row.clone()))
+            .filter_map(|(slot, opt_row)| opt_row.as_ref().map(|row| (slot.clone(), row.clone())))
             .collect();
+
         Ok(block_issuer_vec.into_iter())
     }
 
@@ -159,9 +206,13 @@ impl ReadOnlyStore for MemoryStore {
     > {
         let pool_vec: Vec<_> = self
             .pools
+            .borrow()
             .iter()
-            .map(|(pool_id, row)| (pool_id.clone(), row.clone()))
+            .filter_map(|(pool_id, opt_row)| {
+                opt_row.as_ref().map(|row| (pool_id.clone(), row.clone()))
+            })
             .collect();
+
         Ok(pool_vec.into_iter())
     }
 
@@ -179,9 +230,15 @@ impl ReadOnlyStore for MemoryStore {
     > {
         let accounts_vec: Vec<_> = self
             .accounts
+            .borrow()
             .iter()
-            .map(|(stake_credential, row)| (stake_credential.clone(), row.clone()))
+            .filter_map(|(stake_credential, opt_row)| {
+                opt_row
+                    .as_ref()
+                    .map(|row| (stake_credential.clone(), row.clone()))
+            })
             .collect();
+
         Ok(accounts_vec.into_iter())
     }
 
@@ -199,9 +256,15 @@ impl ReadOnlyStore for MemoryStore {
     > {
         let dreps_vec: Vec<_> = self
             .dreps
+            .borrow()
             .iter()
-            .map(|(stake_credential, row)| (stake_credential.clone(), row.clone()))
+            .filter_map(|(stake_credential, opt_row)| {
+                opt_row
+                    .as_ref()
+                    .map(|row| (stake_credential.clone(), row.clone()))
+            })
             .collect();
+
         Ok(dreps_vec.into_iter())
     }
 
@@ -219,9 +282,15 @@ impl ReadOnlyStore for MemoryStore {
     > {
         let proposals_vec: Vec<_> = self
             .proposals
+            .borrow()
             .iter()
-            .map(|(proposal_id, row)| (proposal_id.clone(), row.clone()))
+            .filter_map(|(proposal_id, opt_row)| {
+                opt_row
+                    .as_ref()
+                    .map(|row| (proposal_id.clone(), row.clone()))
+            })
             .collect();
+
         Ok(proposals_vec.into_iter())
     }
 }
@@ -333,45 +402,93 @@ impl<'a> TransactionalContext<'a> for MemoryTransactionalContext<'a> {
         Ok(())
     }
 
-    fn with_pools(
-        &self,
-        _with: impl FnMut(crate::store::columns::pools::Iter<'_, '_>),
-    ) -> Result<(), crate::store::StoreError> {
+    fn with_pools(&self, mut with: impl FnMut(pools::Iter<'_, '_>)) -> Result<(), StoreError> {
+        let mut pools = self.store.pools.borrow_mut();
+
+        let iter = pools.iter_mut().map(|(k, v)| {
+            let key = k.clone();
+            let boxed: Box<dyn BorrowMut<Option<pools::Row>>> = Box::new(RefMutAdapterMut::new(v));
+            (key, boxed)
+        });
+
+        with(Box::new(iter));
         Ok(())
     }
 
     fn with_accounts(
         &self,
-        _with: impl FnMut(crate::store::columns::accounts::Iter<'_, '_>),
+        mut with: impl FnMut(accounts::Iter<'_, '_>),
     ) -> Result<(), crate::store::StoreError> {
+        let mut pools = self.store.accounts.borrow_mut();
+
+        let iter = pools.iter_mut().map(|(k, v)| {
+            let key = k.clone();
+            let boxed: Box<dyn BorrowMut<Option<accounts::Row>>> =
+                Box::new(RefMutAdapterMut::new(v));
+            (key, boxed)
+        });
+        with(Box::new(iter));
         Ok(())
     }
 
     fn with_block_issuers(
         &self,
-        _with: impl FnMut(crate::store::columns::slots::Iter<'_, '_>),
+        mut with: impl FnMut(crate::store::columns::slots::Iter<'_, '_>),
     ) -> Result<(), crate::store::StoreError> {
+        let mut slots = self.store.slots.borrow_mut();
+
+        let iter = slots.iter_mut().map(|(k, v)| {
+            let key = k.clone();
+            let boxed: Box<dyn BorrowMut<Option<slots::Row>>> = Box::new(RefMutAdapterMut::new(v));
+            (key, boxed)
+        });
+        with(Box::new(iter));
         Ok(())
     }
 
     fn with_utxo(
         &self,
-        _with: impl FnMut(crate::store::columns::utxo::Iter<'_, '_>),
+        mut with: impl FnMut(crate::store::columns::utxo::Iter<'_, '_>),
     ) -> Result<(), crate::store::StoreError> {
+        let mut utxos = self.store.utxos.borrow_mut();
+
+        let iter = utxos.iter_mut().map(|(k, v)| {
+            let key = k.clone();
+            let boxed: Box<dyn BorrowMut<Option<utxo::Value>>> = Box::new(RefMutAdapterMut::new(v));
+            (key, boxed)
+        });
+        with(Box::new(iter));
         Ok(())
     }
 
     fn with_dreps(
         &self,
-        _with: impl FnMut(crate::store::columns::dreps::Iter<'_, '_>),
+        mut with: impl FnMut(crate::store::columns::dreps::Iter<'_, '_>),
     ) -> Result<(), crate::store::StoreError> {
+        let mut dreps = self.store.dreps.borrow_mut();
+
+        let iter = dreps.iter_mut().map(|(k, v)| {
+            let key = k.clone();
+            let boxed: Box<dyn BorrowMut<Option<dreps::Row>>> = Box::new(RefMutAdapterMut::new(v));
+            (key, boxed)
+        });
+        with(Box::new(iter));
         Ok(())
     }
 
     fn with_proposals(
         &self,
-        _with: impl FnMut(crate::store::columns::proposals::Iter<'_, '_>),
+        mut with: impl FnMut(crate::store::columns::proposals::Iter<'_, '_>),
     ) -> Result<(), crate::store::StoreError> {
+        let mut proposals = self.store.proposals.borrow_mut();
+
+        let iter = proposals.iter_mut().map(|(k, v)| {
+            let key = k.clone();
+            let boxed: Box<dyn BorrowMut<Option<proposals::Row>>> =
+                Box::new(RefMutAdapterMut::new(v));
+            (key, boxed)
+        });
+        with(Box::new(iter));
         Ok(())
     }
 }
@@ -395,13 +512,13 @@ impl Store for MemoryStore {
 impl HistoricalStores for MemoryStore {
     fn for_epoch(&self, _epoch: Epoch) -> Result<impl Snapshot, crate::store::StoreError> {
         Ok(MemoryStore {
-            utxos: BTreeMap::new(),
-            accounts: HashMap::new(),
-            pools: HashMap::new(),
+            utxos: RefCell::new(BTreeMap::new()),
+            accounts: RefCell::new(HashMap::new()),
+            pools: RefCell::new(HashMap::new()),
             pots: RefCell::new(pots::Row::default()),
-            slots: BTreeMap::new(),
-            dreps: HashMap::new(),
-            proposals: HashMap::new(),
+            slots: RefCell::new(BTreeMap::new()),
+            dreps: RefCell::new(HashMap::new()),
+            proposals: RefCell::new(BTreeMap::new()),
             p_params: RefCell::new(BTreeMap::new()),
         })
     }
@@ -414,9 +531,8 @@ mod in_memory_tests {
         protocol_parameters::{
             CostModels, DrepThresholds, PoolThresholds, Prices, ProtocolParametersThresholds,
         },
-        Anchor, Bytes, CertificatePointer, ExUnits, GovAction, Hash, Nullable,
-        PostAlonzoTransactionOutput, Proposal, ProposalPointer, PseudoTransactionOutput,
-        RationalNumber, TransactionInput, TransactionPointer, Value,
+        Bytes, CertificatePointer, ExUnits, Hash, Nullable, PostAlonzoTransactionOutput,
+        PseudoTransactionOutput, RationalNumber, TransactionInput, TransactionPointer, Value,
     };
 
     fn dummy_post_alonzo_output() -> PostAlonzoTransactionOutput {
@@ -446,7 +562,7 @@ mod in_memory_tests {
         }
     }
 
-    fn dummy_pool_row() -> pools::Row {
+    fn dummy_pool_row() -> Option<pools::Row> {
         use amaru_kernel::{Nullable, PoolParams, Set, UnitInterval};
         let dummy_pool_params = PoolParams {
             id: Hash::new([0u8; 28]),
@@ -458,15 +574,15 @@ mod in_memory_tests {
                 denominator: 1,
             },
             reward_account: Bytes::from(vec![0u8; 32]),
-            owners: { Set::from(vec![Hash::from([0u8; 28])]) },
+            owners: Set::from(vec![Hash::from([0u8; 28])]),
             relays: Vec::new(),
             metadata: Nullable::Null,
         };
 
-        pools::Row {
+        Some(pools::Row {
             current_params: dummy_pool_params,
             future_params: Vec::new(),
-        }
+        })
     }
 
     fn dummy_pot() -> pots::Row {
@@ -514,72 +630,6 @@ mod in_memory_tests {
             },
             last_interaction: None,
             previous_deregistration: None,
-        }
-    }
-
-    fn dummy_proposal_id1() -> ProposalId {
-        ProposalId {
-            transaction_id: Hash::<32>::from([1u8; 32]),
-            action_index: 0,
-        }
-    }
-
-    fn dummy_proposal_id2() -> ProposalId {
-        ProposalId {
-            transaction_id: Hash::<32>::from([1u8; 32]),
-            action_index: 1,
-        }
-    }
-
-    fn dummy_proposal_row1() -> proposals::Row {
-        proposals::Row {
-            proposed_in: ProposalPointer {
-                transaction: TransactionPointer {
-                    slot: 40u64.into(),
-                    transaction_index: 1,
-                },
-                proposal_index: 21,
-            },
-            valid_until: 40u64.into(),
-            proposal: Proposal {
-                deposit: 100,
-                reward_account: Bytes::from(vec![0u8; 32]),
-                gov_action: GovAction::NoConfidence(Nullable::Some(amaru_kernel::ProposalId {
-                    transaction_id: Hash::new([0u8; 32]),
-                    action_index: 0,
-                })),
-
-                anchor: Anchor {
-                    url: "https://example.com/dummy_anchor".to_string(),
-                    content_hash: Hash::new([0u8; 32]),
-                },
-            },
-        }
-    }
-
-    fn dummy_proposal_row2() -> proposals::Row {
-        proposals::Row {
-            proposed_in: ProposalPointer {
-                transaction: TransactionPointer {
-                    slot: 25u64.into(),
-                    transaction_index: 2,
-                },
-                proposal_index: 21,
-            },
-            valid_until: 47u64.into(),
-            proposal: Proposal {
-                deposit: 200,
-                reward_account: Bytes::from(vec![1u8; 32]),
-                gov_action: GovAction::NoConfidence(Nullable::Some(amaru_kernel::ProposalId {
-                    transaction_id: Hash::<32>::from([1u8; 32]),
-                    action_index: 0,
-                })),
-
-                anchor: Anchor {
-                    url: "https://example2.com/dummy_anchor".to_string(),
-                    content_hash: Hash::<32>::from([1u8; 32]),
-                },
-            },
         }
     }
 
@@ -866,7 +916,7 @@ mod in_memory_tests {
 
     #[test]
     fn test_utxo_returns_dummy_output() {
-        let mut store = MemoryStore::new();
+        let store = MemoryStore::new();
 
         let txin = TransactionInput {
             transaction_id: Hash::new([0u8; 32]),
@@ -875,7 +925,7 @@ mod in_memory_tests {
 
         let output = PseudoTransactionOutput::PostAlonzo(dummy_post_alonzo_output());
 
-        store.utxos.insert(txin.clone(), output);
+        store.utxos.borrow_mut().insert(txin.clone(), Some(output));
 
         let result = store.utxo(&txin).unwrap();
 
@@ -884,14 +934,17 @@ mod in_memory_tests {
 
     #[test]
     fn test_account_returns_correct_row() {
-        let mut store = MemoryStore::new();
+        let store = MemoryStore::new();
 
         let credential = dummy_stake_credential();
 
+        // Borrow mutably to insert the dummy account row
         store
             .accounts
-            .insert(credential.clone(), dummy_account_row());
+            .borrow_mut()
+            .insert(credential.clone(), Some(dummy_account_row()));
 
+        // Now call the method that reads immutably
         let result = store.account(&credential).unwrap();
 
         assert!(result.is_some());
@@ -903,13 +956,15 @@ mod in_memory_tests {
 
     #[test]
     fn test_pool_returns_correct_row() {
-        let mut store = MemoryStore::new();
+        let store = MemoryStore::new();
 
         let pool_id = Hash::new([0u8; 28]);
         let dummy_row = dummy_pool_row();
 
-        store.pools.insert(pool_id.clone(), dummy_row);
+        // Borrow mutably to insert the dummy row
+        store.pools.borrow_mut().insert(pool_id.clone(), dummy_row);
 
+        // Call the method that borrows immutably inside
         let result = store.pool(&pool_id).unwrap();
 
         assert!(result.is_some());
@@ -940,7 +995,7 @@ mod in_memory_tests {
 
     #[test]
     fn test_iter_utxos_returns_inserted_utxos() {
-        let mut store = MemoryStore::new();
+        let store = MemoryStore::new();
 
         let txin1 = TransactionInput {
             transaction_id: Hash::new([1u8; 32]),
@@ -954,8 +1009,14 @@ mod in_memory_tests {
         let output1 = PseudoTransactionOutput::PostAlonzo(dummy_post_alonzo_output());
         let output2 = PseudoTransactionOutput::PostAlonzo(dummy_post_alonzo_output());
 
-        store.utxos.insert(txin1.clone(), output1.clone());
-        store.utxos.insert(txin2.clone(), output2.clone());
+        store
+            .utxos
+            .borrow_mut()
+            .insert(txin1.clone(), Some(output1.clone()));
+        store
+            .utxos
+            .borrow_mut()
+            .insert(txin2.clone(), Some(output2.clone()));
 
         let results = store.iter_utxos().unwrap().collect::<Vec<_>>();
 
@@ -967,19 +1028,18 @@ mod in_memory_tests {
 
     #[test]
     fn test_iter_accounts_returns_inserted_accounts() {
-        let mut store = MemoryStore::new();
+        let store = MemoryStore::new();
 
         let stake_credential1 = dummy_stake_credential();
         let stake_credential2 = dummy_stake_credential2();
         let row1 = dummy_account_row();
         let row2 = dummy_account_row2();
 
-        store
-            .accounts
-            .insert(stake_credential1.clone(), row1.clone());
-        store
-            .accounts
-            .insert(stake_credential2.clone(), row2.clone());
+        {
+            let mut accounts = store.accounts.borrow_mut();
+            accounts.insert(stake_credential1.clone(), Some(row1.clone()));
+            accounts.insert(stake_credential2.clone(), Some(row2.clone()));
+        }
 
         let mut results = store.iter_accounts().unwrap().collect::<Vec<_>>();
         results.sort_by_key(|(k, _)| k.clone());
@@ -992,15 +1052,21 @@ mod in_memory_tests {
 
     #[test]
     fn test_iter_dreps_returns_inserted_dreps() {
-        let mut store = MemoryStore::new();
+        let store = MemoryStore::new();
 
         let stake_credential1 = dummy_stake_credential();
         let stake_credential2 = dummy_stake_credential2();
         let row1 = dummy_drep_row();
         let row2 = dummy_drep_row2();
 
-        store.dreps.insert(stake_credential1.clone(), row1.clone());
-        store.dreps.insert(stake_credential2.clone(), row2.clone());
+        store
+            .dreps
+            .borrow_mut()
+            .insert(stake_credential1.clone(), Some(row1.clone()));
+        store
+            .dreps
+            .borrow_mut()
+            .insert(stake_credential2.clone(), Some(row2.clone()));
 
         let mut results = store.iter_dreps().unwrap().collect::<Vec<_>>();
         results.sort_by_key(|(k, _)| k.clone());
@@ -1011,7 +1077,73 @@ mod in_memory_tests {
         assert_eq!(results, expected);
     }
 
-    /*#[test] // Test not working. Investigate further.
+    /*fn dummy_proposal_id1() -> ProposalId {
+        ProposalId {
+            transaction_id: Hash::<32>::from([1u8; 32]),
+            action_index: 0,
+        }
+    }
+
+    fn dummy_proposal_id2() -> ProposalId {
+        ProposalId {
+            transaction_id: Hash::<32>::from([1u8; 32]),
+            action_index: 1,
+        }
+    }
+
+    fn dummy_proposal_row1() -> proposals::Row {
+        proposals::Row {
+            proposed_in: ProposalPointer {
+                transaction: TransactionPointer {
+                    slot: 40u64.into(),
+                    transaction_index: 1,
+                },
+                proposal_index: 21,
+            },
+            valid_until: 40u64.into(),
+            proposal: Proposal {
+                deposit: 100,
+                reward_account: Bytes::from(vec![0u8; 32]),
+                gov_action: GovAction::NoConfidence(Nullable::Some(amaru_kernel::ProposalId {
+                    transaction_id: Hash::new([0u8; 32]),
+                    action_index: 0,
+                })),
+
+                anchor: Anchor {
+                    url: "https://example.com/dummy_anchor".to_string(),
+                    content_hash: Hash::new([0u8; 32]),
+                },
+            },
+        }
+    }
+
+    fn dummy_proposal_row2() -> proposals::Row {
+        proposals::Row {
+            proposed_in: ProposalPointer {
+                transaction: TransactionPointer {
+                    slot: 25u64.into(),
+                    transaction_index: 2,
+                },
+                proposal_index: 21,
+            },
+            valid_until: 47u64.into(),
+            proposal: Proposal {
+                deposit: 200,
+                reward_account: Bytes::from(vec![1u8; 32]),
+                gov_action: GovAction::NoConfidence(Nullable::Some(amaru_kernel::ProposalId {
+                    transaction_id: Hash::<32>::from([1u8; 32]),
+                    action_index: 0,
+                })),
+
+                anchor: Anchor {
+                    url: "https://example2.com/dummy_anchor".to_string(),
+                    content_hash: Hash::<32>::from([1u8; 32]),
+                },
+            },
+        }
+    }
+    // Test not working due to Ord not being implemented on ProposalId
+    #[test]
     fn test_iter_proposals_returns_inserted_proposals() {
         let mut store = MemoryStore::new();
 
@@ -1020,8 +1152,14 @@ mod in_memory_tests {
         let row1 = dummy_proposal_row1();
         let row2 = dummy_proposal_row2();
 
-        store.proposals.insert(proposal_id1.clone(), row1.clone());
-        store.proposals.insert(proposal_id2.clone(), row2.clone());
+        store
+            .proposals
+            .borrow_mut()
+            .insert(proposal_id1.clone(), Some(row1.clone()));
+        store
+            .proposals
+            .borrow_mut()
+            .insert(proposal_id2.clone(), Some(row2.clone()));
 
         let mut results = store.iter_proposals().unwrap().collect::<Vec<_>>();
 
