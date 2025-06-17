@@ -14,9 +14,10 @@ use amaru_ledger::{
     store::{HistoricalStores, Store, StoreError},
 };
 use anyhow::Context;
-use gasket::framework::{AsWorkError, WorkSchedule, WorkerError};
+use gasket::framework::{WorkSchedule, WorkerError};
 use tracing::{error, instrument, Level, Span};
-use tracing_opentelemetry::OpenTelemetrySpanExt;
+
+use crate::{schedule, send, stages::common::adopt_current_span};
 
 pub type UpstreamPort = gasket::messaging::InputPort<ValidateBlockEvent>;
 pub type DownstreamPort = gasket::messaging::OutputPort<BlockValidationResult>;
@@ -115,7 +116,7 @@ impl<S: Store + Send, HS: HistoricalStores + Send> ValidateBlockStage<S, HS> {
         match rules::validate_block(&mut context, self.state.protocol_parameters(), &block) {
             BlockValidation::Err(err) => return Err(err),
             BlockValidation::Invalid(err) => {
-                error!("Block invalid: {:?}", err);
+                error!("Block invalid: {}", err);
                 return Ok(Some(err));
             }
             BlockValidation::Valid(()) => {
@@ -160,8 +161,7 @@ impl<S: Store + Send, HS: HistoricalStores + Send>
         &mut self,
         stage: &mut ValidateBlockStage<S, HS>,
     ) -> Result<WorkSchedule<ValidateBlockEvent>, WorkerError> {
-        let unit = stage.upstream.recv().await.or_panic()?;
-        Ok(WorkSchedule::Unit(unit.payload))
+        schedule!(&mut stage.upstream)
     }
 
     #[instrument(
@@ -174,37 +174,41 @@ impl<S: Store + Send, HS: HistoricalStores + Send>
         unit: &ValidateBlockEvent,
         stage: &mut ValidateBlockStage<S, HS>,
     ) -> Result<(), WorkerError> {
+        adopt_current_span(unit);
         let result = match unit {
-            ValidateBlockEvent::Validated { point, block, span } => stage
-                .roll_forward(point.clone(), block.to_vec())
-                .map(|res| match res {
-                    None => BlockValidationResult::BlockValidated {
-                        point: point.clone(),
-                        block: block.to_vec(),
-                        span: restore_span(span),
+            ValidateBlockEvent::Validated { point, block, span } => {
+                let point = point.clone();
+                let block = block.to_vec();
+
+                match stage.roll_forward(point.clone(), block.clone()) {
+                    Ok(None) => BlockValidationResult::BlockValidated {
+                        point,
+                        block,
+                        span: span.clone(),
                     },
-                    Some(_err) => BlockValidationResult::BlockValidationFailed {
-                        point: point.clone(),
-                        span: restore_span(span),
+                    Ok(Some(_)) => BlockValidationResult::BlockValidationFailed {
+                        point,
+                        span: span.clone(),
                     },
-                })
-                .or_panic()?,
+                    Err(err) => {
+                        error!(?err, "Failed to validate block");
+                        BlockValidationResult::BlockValidationFailed {
+                            point,
+                            span: span.clone(),
+                        }
+                    }
+                }
+            }
             ValidateBlockEvent::Rollback {
                 rollback_point,
                 span,
             } => {
                 stage
-                    .rollback_to(rollback_point.clone(), restore_span(span))
+                    .rollback_to(rollback_point.clone(), span.clone())
                     .await
             }
         };
 
-        Ok(stage.downstream.send(result.into()).await.or_panic()?)
+        send!(&mut stage.downstream, result)
     }
-}
-
-fn restore_span(parent_span: &Span) -> Span {
-    let span = Span::current();
-    span.set_parent(parent_span.context());
-    span
 }

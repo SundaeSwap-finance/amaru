@@ -1,6 +1,6 @@
 use amaru::stages::{pull, PeerSession};
 use amaru_consensus::{consensus::store::ChainStore, peer::Peer, IsHeader};
-use amaru_kernel::{from_cbor, network::NetworkName, Header, Point};
+use amaru_kernel::{default_chain_dir, from_cbor, network::NetworkName, Header, Point};
 use amaru_stores::rocksdb::consensus::RocksDBStore;
 use clap::Parser;
 use gasket::framework::*;
@@ -9,7 +9,7 @@ use pallas_network::{
     facades::PeerClient,
     miniprotocols::chainsync::{self, HeaderContent, NextResponse},
 };
-use std::{path::PathBuf, sync::Arc, time::Duration};
+use std::{error::Error, path::PathBuf, sync::Arc, time::Duration};
 use tokio::{sync::Mutex, time::timeout};
 use tracing::info;
 
@@ -39,8 +39,8 @@ pub struct Args {
     ///
     /// This is the directory where data will be stored. The directory and any intermediate
     /// paths will be created if they do not exist.
-    #[arg(long, value_name = "DIR", verbatim_doc_comment, default_value = super::DEFAULT_CHAIN_DB_DIR)]
-    chain_dir: PathBuf,
+    #[arg(long, value_name = "DIR", verbatim_doc_comment)]
+    chain_dir: Option<PathBuf>,
 
     /// Starting point of import.
     ///
@@ -64,30 +64,45 @@ enum What {
 use What::*;
 
 pub async fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
-    let era_history = args.network.into();
-    let mut db = RocksDBStore::new(&args.chain_dir, era_history)?;
+    let chain_dir = args
+        .chain_dir
+        .unwrap_or_else(|| default_chain_dir(args.network).into());
+    import_headers(
+        &args.peer_address,
+        args.network,
+        &chain_dir,
+        args.starting_point,
+        args.count,
+    )
+    .await
+}
+
+pub(crate) async fn import_headers(
+    peer_address: &str,
+    network_name: NetworkName,
+    chain_db_dir: &PathBuf,
+    point: Point,
+    max: usize,
+) -> Result<(), Box<dyn Error>> {
+    let era_history = network_name.into();
+    let mut db = RocksDBStore::new(chain_db_dir, era_history)?;
 
     let peer_client = Arc::new(Mutex::new(
-        PeerClient::connect(
-            args.peer_address.clone(),
-            args.network.to_network_magic() as u64,
-        )
-        .await?,
+        PeerClient::connect(peer_address, network_name.to_network_magic() as u64).await?,
     ));
 
     let peer_session = PeerSession {
-        peer: Peer::new(&args.peer_address),
+        peer: Peer::new(peer_address),
         peer_client,
     };
 
-    let mut pull = pull::Stage::new(peer_session.clone(), vec![args.starting_point.clone()]);
+    let mut pull = pull::Stage::new(peer_session.clone(), vec![point.clone()]);
 
     pull.find_intersection().await?;
 
     let mut peer_client = pull.peer_session.lock().await;
     let mut count = 0;
-    let max = args.count;
-    let start = args.starting_point.slot_or_default().into();
+    let start = point.slot_or_default().into();
 
     let client = (*peer_client).chainsync();
 

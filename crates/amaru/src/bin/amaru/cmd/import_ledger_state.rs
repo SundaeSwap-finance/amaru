@@ -13,13 +13,14 @@
 // limitations under the License.
 
 use amaru_kernel::{
-    network::NetworkName, protocol_parameters::ProtocolParameters, Anchor, CertificatePointer,
-    DRep, EraHistory, Lovelace, Point, PoolId, PoolParams, Proposal, ProposalId, ProposalPointer,
-    Set, Slot, StakeCredential, TransactionInput, TransactionOutput, TransactionPointer,
+    default_ledger_dir, network::NetworkName, protocol_parameters::ProtocolParameters, Anchor,
+    CertificatePointer, DRep, EraHistory, Lovelace, Point, PoolId, PoolParams, Proposal,
+    ProposalId, ProposalPointer, Set, Slot, StakeCredential, TransactionInput, TransactionOutput,
+    TransactionPointer,
 };
 use amaru_ledger::{
     self,
-    state::{self, diff_bind::Resettable},
+    state::diff_bind::Resettable,
     store::{
         self, columns::proposals, EpochTransitionProgress, Store, StoreError, TransactionalContext,
     },
@@ -69,8 +70,8 @@ pub struct Args {
     snapshot_dir: Option<PathBuf>,
 
     /// Path of the ledger on-disk storage.
-    #[arg(long, value_name = "DIR", default_value = super::DEFAULT_LEDGER_DB_DIR)]
-    ledger_dir: PathBuf,
+    #[arg(long, value_name = "DIR")]
+    ledger_dir: Option<PathBuf>,
 
     /// Network the snapshots are imported from.
     ///
@@ -95,19 +96,44 @@ enum Error {
 pub async fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
     let network = args.network;
     let era_history = network.into();
+    let ledger_dir = args
+        .ledger_dir
+        .unwrap_or_else(|| default_ledger_dir(args.network).into());
     if !args.snapshot.is_empty() {
-        import_all(&args.snapshot, &args.ledger_dir, era_history).await
+        import_all(&args.snapshot, &ledger_dir, era_history).await
     } else if let Some(snapshot_dir) = args.snapshot_dir {
-        let mut snapshots = fs::read_dir(snapshot_dir)?
-            .filter_map(|entry| entry.ok().map(|e| e.path()))
-            .filter(|path| path.extension().and_then(|s| s.to_str()) == Some("cbor"))
-            .collect::<Vec<_>>();
-        snapshots.sort();
-
-        import_all(&snapshots, &args.ledger_dir, era_history).await
+        import_all_from_directory(&ledger_dir, era_history, &snapshot_dir).await
     } else {
         Err(Error::IncorrectUsage.into())
     }
+}
+
+pub(crate) async fn import_all_from_directory(
+    ledger_dir: &PathBuf,
+    era_history: &EraHistory,
+    snapshot_dir: &PathBuf,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut snapshots = fs::read_dir(snapshot_dir)?
+        .filter_map(|entry| entry.ok().map(|e| e.path()))
+        .filter(|path| path.extension().and_then(|s| s.to_str()) == Some("cbor"))
+        .collect::<Vec<_>>();
+
+    sort_snapshots_by_slot(&mut snapshots);
+
+    import_all(&snapshots, ledger_dir, era_history).await
+}
+
+fn sort_snapshots_by_slot(snapshots: &mut [PathBuf]) {
+    // Sort by parsed slot number from filename
+    snapshots.sort_by_key(|path| {
+        path.file_stem()
+            .and_then(|s| s.to_str())
+            .and_then(|s| s.split('.').next())
+            .and_then(|s| s.parse::<u64>().ok())
+            .unwrap_or(u64::MAX)
+    });
+
+    snapshots.sort();
 }
 
 async fn import_all(
@@ -154,19 +180,12 @@ async fn import_one(
     )?;
     transaction.commit()?;
 
-    let snapshot = db.snapshots()?.last().map(|s| *s + 1).unwrap_or(epoch);
-    db.next_snapshot(snapshot)?;
+    db.next_snapshot(epoch)?;
 
     let transaction = db.create_transaction();
-    state::reset_blocks_count(&transaction)?;
-    state::reset_fees(&transaction)?;
-    transaction.with_pools(|iterator| {
-        for (_, pool) in iterator {
-            amaru_ledger::store::columns::pools::Row::tick(pool, epoch + 1);
-        }
-    })?;
     transaction.try_epoch_transition(None, Some(EpochTransitionProgress::SnapshotTaken))?;
     transaction.commit()?;
+
     info!("Imported snapshot for epoch {}", epoch);
     Ok(())
 }
@@ -515,7 +534,7 @@ fn import_dreps(
                     if state.expiry > epoch + protocol_parameters.drep_expiry as u64 {
                         (epoch_bound.start, last_interaction)
                     } else {
-                        (epoch_bound.end, last_interaction)
+                        (point.slot_or_default(), last_interaction)
                     }
                 } else {
                     let last_interaction = state.expiry - protocol_parameters.drep_expiry as u64;

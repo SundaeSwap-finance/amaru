@@ -29,6 +29,7 @@ use pallas_codec::{
     minicbor::{decode, encode, Decode, Decoder, Encode, Encoder},
     utils::CborWrap,
 };
+use pallas_primitives::alonzo::Value as AlonzoValue;
 use pallas_primitives::{
     conway::{
         MintedPostAlonzoTransactionOutput, NativeScript, PseudoDatumOption, Redeemer, RedeemerTag,
@@ -56,9 +57,6 @@ pub use pallas_crypto::{
     key::ed25519,
 };
 pub use pallas_primitives::{
-    // TODO: Shouldn't re-export alonzo, but prefer exporting unqualified identifiers directly.
-    // Investigate.
-    alonzo,
     babbage::{Header, MintedHeader},
     conway::{
         AddrKeyhash, Anchor, AuxiliaryData, Block, BootstrapWitness, Certificate, Coin,
@@ -77,6 +75,8 @@ pub use pallas_traverse::{ComputeHash, OriginalHash};
 pub use serde_json as json;
 pub use sha3;
 pub use slot_arithmetic::{Bound, EraHistory, EraParams, Slot, Summary};
+
+use crate::network::NetworkName;
 
 pub mod block;
 pub mod macros;
@@ -649,11 +649,11 @@ impl HasLovelace for Value {
     }
 }
 
-impl HasLovelace for alonzo::Value {
+impl HasLovelace for AlonzoValue {
     fn lovelace(&self) -> Lovelace {
         match self {
-            alonzo::Value::Coin(lovelace) => *lovelace,
-            alonzo::Value::Multiasset(lovelace, _) => *lovelace,
+            AlonzoValue::Coin(lovelace) => *lovelace,
+            AlonzoValue::Multiasset(lovelace, _) => *lovelace,
         }
     }
 }
@@ -1170,6 +1170,14 @@ pub fn sum_ex_units(left: ExUnits, right: ExUnits) -> ExUnits {
         mem: left.mem + right.mem,
         steps: left.steps + right.steps,
     }
+}
+
+pub fn default_ledger_dir(network: NetworkName) -> String {
+    format!("./ledger.{}.db", network.to_string().to_lowercase())
+}
+
+pub fn default_chain_dir(network: NetworkName) -> String {
+    format!("./chain.{}.db", network.to_string().to_lowercase())
 }
 
 #[cfg(test)]

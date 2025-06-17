@@ -51,6 +51,7 @@ use pallas_network::{facades::PeerClient, miniprotocols::chainsync::Tip};
 use std::{error::Error, path::PathBuf, sync::Arc};
 use tokio::sync::Mutex;
 
+pub mod common;
 pub mod consensus;
 pub mod ledger;
 pub mod pull;
@@ -131,12 +132,12 @@ pub fn bootstrap(
     let chain_selector = make_chain_selector(&header, &peer_sessions)?;
     let consensus = match ledger_stage {
         LedgerStage::InMemLedgerStage(ref validate_block_stage) => ValidateHeader::new(
-            Box::new(validate_block_stage.state.view_stake_distribution()),
+            Arc::new(validate_block_stage.state.view_stake_distribution()),
             chain_store_ref.clone(),
         ),
 
         LedgerStage::OnDiskLedgerStage(ref validate_block_stage) => ValidateHeader::new(
-            Box::new(validate_block_stage.state.view_stake_distribution()),
+            Arc::new(validate_block_stage.state.view_stake_distribution()),
             chain_store_ref.clone(),
         ),
     };
@@ -369,6 +370,7 @@ impl AsTip for Header {
 
 #[cfg(test)]
 mod tests {
+
     use super::{bootstrap, Config, StorePath::*};
 
     #[test]
