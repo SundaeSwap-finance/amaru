@@ -89,6 +89,21 @@ pub struct MemoryStore {
     p_params: RefCell<BTreeMap<Epoch, ProtocolParameters>>,
 }
 
+impl Default for MemoryStore {
+    fn default() -> Self {
+        MemoryStore {
+            utxos: RefCell::new(BTreeMap::new()),
+            accounts: RefCell::new(HashMap::new()),
+            pools: RefCell::new(HashMap::new()),
+            pots: RefCell::new(pots::Row::default()),
+            slots: RefCell::new(BTreeMap::new()),
+            dreps: RefCell::new(HashMap::new()),
+            proposals: RefCell::new(BTreeMap::new()),
+            p_params: RefCell::new(BTreeMap::new()),
+        }
+    }
+}
+
 impl MemoryStore {
     pub fn new() -> Self {
         Self {

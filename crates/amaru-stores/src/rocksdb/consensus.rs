@@ -16,7 +16,7 @@ use amaru_consensus::{
     consensus::store::{ChainStore, StoreError},
     Nonces,
 };
-use amaru_kernel::{cbor, from_cbor, network::NetworkName, to_cbor, Hash, RawBlock};
+use amaru_kernel::{cbor, from_cbor, to_cbor, Hash, RawBlock};
 use amaru_ouroboros_traits::is_header::IsHeader;
 use rocksdb::{OptimisticTransactionDB, Options};
 use slot_arithmetic::EraHistory;
@@ -106,31 +106,38 @@ impl<H: IsHeader + for<'d> cbor::Decode<'d, ()>> ChainStore<H> for RocksDBStore 
     }
 }
 
-pub struct InMemConsensusStore {
+pub struct InMemConsensusStore<H> {
     nonces: BTreeMap<Hash<32>, Nonces>,
+    headers: BTreeMap<Hash<32>, H>,
+    blocks: BTreeMap<Hash<32>, RawBlock>,
+    era_history: EraHistory,
 }
 
-impl Default for InMemConsensusStore {
+impl<H> Default for InMemConsensusStore<H> {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl InMemConsensusStore {
-    pub fn new() -> InMemConsensusStore {
+impl<H> InMemConsensusStore<H> {
+    pub fn new() -> InMemConsensusStore<H> {
         InMemConsensusStore {
             nonces: BTreeMap::new(),
+            headers: BTreeMap::new(),
+            blocks: BTreeMap::new(),
+            era_history: EraHistory::default(),
         }
     }
 }
 
-impl<H: IsHeader> ChainStore<H> for InMemConsensusStore {
-    fn load_header(&self, _hash: &Hash<32>) -> Option<H> {
-        unimplemented!()
+impl<H: IsHeader + Clone + Sync + Send> ChainStore<H> for InMemConsensusStore<H> {
+    fn load_header(&self, hash: &Hash<32>) -> Option<H> {
+        self.headers.get(hash).cloned()
     }
 
-    fn store_header(&mut self, _hash: &Hash<32>, _header: &H) -> Result<(), StoreError> {
-        unimplemented!()
+    fn store_header(&mut self, hash: &Hash<32>, header: &H) -> Result<(), StoreError> {
+        self.headers.insert(*hash, header.clone());
+        Ok(())
     }
 
     fn get_nonces(&self, header: &Hash<32>) -> Option<Nonces> {
@@ -143,15 +150,19 @@ impl<H: IsHeader> ChainStore<H> for InMemConsensusStore {
     }
 
     fn era_history(&self) -> &amaru_kernel::EraHistory {
-        NetworkName::Testnet(42).into()
+        &self.era_history
     }
 
-    fn load_block(&self, _hash: &Hash<32>) -> Result<RawBlock, StoreError> {
-        unimplemented!()
+    fn load_block(&self, hash: &Hash<32>) -> Result<RawBlock, StoreError> {
+        self.blocks
+            .get(hash)
+            .cloned()
+            .ok_or(StoreError::NotFound { hash: *hash })
     }
 
-    fn store_block(&mut self, _hash: &Hash<32>, _block: &RawBlock) -> Result<(), StoreError> {
-        unimplemented!()
+    fn store_block(&mut self, hash: &Hash<32>, block: &RawBlock) -> Result<(), StoreError> {
+        self.blocks.insert(*hash, block.clone());
+        Ok(())
     }
 }
 
@@ -223,5 +234,25 @@ mod test {
             }),
             result
         );
+    }
+
+    #[test]
+    fn in_mem_chain_store_can_get_header_it_puts() {
+        let mut store: InMemConsensusStore<FakeHeader> = InMemConsensusStore::new();
+
+        let header = FakeHeader {
+            block_number: 1,
+            slot: 0,
+            parent: None,
+            body_hash: random_bytes(32).as_slice().into(),
+        };
+
+        store.store_header(&header.hash(), &header).unwrap();
+
+        let header2 = store
+            .load_header(&header.hash())
+            .expect("Header should be found");
+
+        assert_eq!(header, header2);
     }
 }

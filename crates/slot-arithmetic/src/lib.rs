@@ -342,6 +342,12 @@ impl<'b, C> Decode<'b, C> for EraHistory {
     }
 }
 
+impl Default for EraHistory {
+    fn default() -> Self {
+        Self { eras: Vec::new() }
+    }
+}
+
 #[derive(Debug, PartialEq, Eq, thiserror::Error)]
 pub enum TimeHorizonError {
     #[error("slot past time horizon")]

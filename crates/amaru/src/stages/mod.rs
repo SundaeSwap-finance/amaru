@@ -296,8 +296,8 @@ fn make_ledger(
     match config.ledger_store {
         StorePath::InMem => {
             let (ledger, tip) = ledger::ValidateBlockStage::new(
-                MemoryStore {},
-                MemoryStore {},
+                MemoryStore::default(),
+                MemoryStore::default(),
                 era_history.clone(),
                 global_parameters.clone(),
             )?;
@@ -384,5 +384,25 @@ mod tests {
         let stages = bootstrap(config, vec![]).unwrap();
 
         assert_eq!(8, stages.len());
+    }
+
+    #[test]
+    fn bootstrap_inmem_detailed() {
+        let config = Config {
+            ledger_store: InMem,
+            chain_store: InMem,
+            ..Config::default()
+        };
+
+        match bootstrap(config, vec![]) {
+            Ok(stages) => {
+                println!("Bootstrap succeeded with {} stages", stages.len());
+                assert_eq!(8, stages.len());
+            }
+            Err(e) => {
+                eprintln!("Bootstrap failure reason: {:?}", e);
+                panic!("Bootstrap failed: {:?}", e);
+            }
+        }
     }
 }
