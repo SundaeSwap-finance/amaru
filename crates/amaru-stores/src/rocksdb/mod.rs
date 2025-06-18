@@ -313,7 +313,7 @@ fn with_prefix_iterator<
     Ok(())
 }
 
-struct RocksDBTransactionalContext<'a> {
+pub struct RocksDBTransactionalContext<'a> {
     db: &'a RocksDB,
     transaction: Transaction<'a, OptimisticTransactionDB>,
 }

@@ -101,7 +101,7 @@ pub(crate) mod tests {
     prop_cbor_roundtrip!(Row, any_row());
 
     prop_compose! {
-        fn any_row()(
+        pub fn any_row()(
             deposit in any::<Lovelace>(),
             anchor in option::of(any_anchor()),
             registered_at in any_certificate_pointer(),

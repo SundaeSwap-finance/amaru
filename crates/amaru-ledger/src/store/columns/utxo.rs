@@ -21,3 +21,38 @@ pub type Value = TransactionOutput;
 
 /// Iterator used to browse rows from the Pools column. Meant to be referenced using qualified imports.
 pub type Iter<'a, 'b> = IterBorrow<'a, 'b, Key, Option<Value>>;
+
+#[cfg(test)]
+pub(crate) mod test {
+    use amaru_kernel::{
+        Bytes, Hash, PostAlonzoTransactionOutput, PseudoTransactionOutput, TransactionInput, Value,
+    };
+    use proptest::prelude::*;
+
+    prop_compose! {
+        pub(crate) fn any_txin()(
+            hash in any::<[u8; 32]>(),
+            index in any::<u16>(),
+        ) -> TransactionInput {
+            TransactionInput {
+                transaction_id: Hash::from(hash),
+                index: index as u64,
+            }
+        }
+    }
+
+    prop_compose! {
+        pub(crate) fn any_pseudo_transaction_output()(
+            amount in any::<u64>(),
+        ) -> PseudoTransactionOutput<PostAlonzoTransactionOutput> {
+            let inner = PostAlonzoTransactionOutput {
+                address: Bytes::from(vec![0u8; 32]),
+                value: Value::Coin(amount),
+                datum_option: None,
+                script_ref: None,
+            };
+
+            PseudoTransactionOutput::PostAlonzo(inner)
+        }
+    }
+}
