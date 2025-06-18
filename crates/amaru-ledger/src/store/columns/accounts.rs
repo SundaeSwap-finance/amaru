@@ -91,7 +91,7 @@ pub(crate) mod test {
     prop_cbor_roundtrip!(Row, any_row());
 
     prop_compose! {
-        fn any_row()(
+        pub(crate) fn any_row()(
             delegatee in option::of(any_pool_id()),
             deposit in any::<Lovelace>(),
             drep in option::of(any_drep()),

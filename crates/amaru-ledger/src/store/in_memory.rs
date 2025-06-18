@@ -128,7 +128,8 @@ impl Snapshot for MemoryStore {
 impl ReadOnlyStore for MemoryStore {
     fn get_protocol_parameters_for(&self, epoch: &Epoch) -> Result<ProtocolParameters, StoreError> {
         let map = self.p_params.borrow();
-        map.get(epoch).ok_or(StoreError::NotFound).cloned()
+        let params = map.get(epoch).cloned().unwrap_or_default();
+        Ok(params)
     }
 
     fn account(
@@ -1210,7 +1211,7 @@ mod in_memory_tests {
 
         let epoch3: Epoch = 3u64.into();
         let result3 = store.get_protocol_parameters_for(&epoch3);
-        assert!(matches!(result3, Err(StoreError::NotFound)));
+        assert!(matches!(result3, ProtocolParamters::default()));
     }
 
     #[test]

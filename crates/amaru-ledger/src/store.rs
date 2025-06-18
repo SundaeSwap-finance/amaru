@@ -63,8 +63,6 @@ pub enum StoreError {
     Open(#[source] OpenErrorKind),
     #[error("error opening the tip: {0}")]
     Tip(#[source] TipErrorKind),
-    #[error("requested item not found")]
-    NotFound,
 }
 
 // Store
@@ -287,3 +285,26 @@ impl<U, P, A, D, C, PP> Default
         }
     }
 }
+
+impl<U, P, A, D, C, PP> Columns<U, P, A, D, C, PP> {
+    pub fn empty() -> Columns<
+        std::iter::Empty<U>,
+        std::iter::Empty<P>,
+        std::iter::Empty<A>,
+        std::iter::Empty<D>,
+        std::iter::Empty<C>,
+        std::iter::Empty<PP>,
+    > {
+        Columns {
+            utxo: std::iter::empty(),
+            pools: std::iter::empty(),
+            accounts: std::iter::empty(),
+            dreps: std::iter::empty(),
+            cc_members: std::iter::empty(),
+            proposals: std::iter::empty(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod test_store;

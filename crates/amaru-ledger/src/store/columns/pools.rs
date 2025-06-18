@@ -240,6 +240,15 @@ pub(crate) mod tests {
     use proptest::prelude::*;
 
     prop_compose! {
+        pub(crate) fn any_pool_entry()(
+            pool_params in any_pool_params(),
+            epoch in any::<u64>(),
+        ) -> (PoolParams, Epoch) {
+            (pool_params, Epoch::from(epoch))
+        }
+    }
+
+    prop_compose! {
         pub(crate) fn any_pool_id()(
             bytes in any::<[u8; 28]>(),
         ) -> PoolId {
@@ -279,7 +288,7 @@ pub(crate) mod tests {
     }
 
     // Generate arbitrary `Row`, good for serialization for not for logic.
-    fn any_row() -> impl Strategy<Value = Row> {
+    pub fn any_row() -> impl Strategy<Value = Row> {
         prop::collection::vec(0..3u64, 0..3)
             .prop_flat_map(|epochs| {
                 epochs

@@ -64,3 +64,26 @@ impl<'a, C> cbor::decode::Decode<'a, C> for Row {
         Ok(Row::new(slot_leader))
     }
 }
+
+#[cfg(test)]
+pub(crate) mod tests {
+    use super::*;
+    use amaru_kernel::PoolId;
+    use proptest::prelude::*;
+
+    prop_compose! {
+        pub(crate) fn any_slot()(
+            n in any::<u64>(),
+        ) -> Slot {
+            Slot::from(n)
+        }
+    }
+
+    prop_compose! {
+        pub(crate) fn any_row()(
+            slot_leader in any::<[u8; 28]>().prop_map(PoolId::new),
+        ) -> Row {
+            Row::new(slot_leader)
+        }
+    }
+}
