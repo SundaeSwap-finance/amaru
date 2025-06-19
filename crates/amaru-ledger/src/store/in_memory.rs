@@ -1,5 +1,5 @@
 use crate::store::{
-    columns::{accounts, dreps, pools, pots, proposals, slots, utxo},
+    columns::{accounts, cc_members, dreps, pools, pots, proposals, slots, utxo},
     EpochTransitionProgress, HistoricalStores, ReadOnlyStore, Snapshot, Store, StoreError,
     TransactionalContext,
 };
@@ -79,43 +79,42 @@ impl<'a, T> BorrowMut<T> for RefMutAdapterMut<'a, T> {
 }
 
 pub struct MemoryStore {
+    tip: RefCell<Option<Point>>,
+    epoch_progress: RefCell<Option<EpochTransitionProgress>>,
     utxos: RefCell<BTreeMap<TransactionInput, Option<utxo::Value>>>,
-    accounts: RefCell<HashMap<StakeCredential, Option<accounts::Row>>>,
-    pools: RefCell<HashMap<PoolId, Option<pools::Row>>>,
+    accounts: RefCell<BTreeMap<StakeCredential, Option<accounts::Row>>>,
+    pools: RefCell<BTreeMap<PoolId, Option<pools::Row>>>,
     pots: RefCell<pots::Row>,
     slots: RefCell<BTreeMap<Slot, Option<slots::Row>>>,
-    dreps: RefCell<HashMap<StakeCredential, Option<dreps::Row>>>,
+    dreps: RefCell<BTreeMap<StakeCredential, Option<dreps::Row>>>,
     proposals: RefCell<BTreeMap<ProposalId, Option<proposals::Row>>>,
+    cc_members: RefCell<BTreeMap<StakeCredential, Option<cc_members::Row>>>,
     p_params: RefCell<BTreeMap<Epoch, ProtocolParameters>>,
+    era_history: EraHistory,
 }
 
 impl Default for MemoryStore {
-    fn default() -> Self {
+    fn default(era_history: EraHistory) -> Self {
         MemoryStore {
+            tip: RefCell::new(None),
+            epoch_progress: RefCell::new(None),
             utxos: RefCell::new(BTreeMap::new()),
-            accounts: RefCell::new(HashMap::new()),
-            pools: RefCell::new(HashMap::new()),
+            accounts: RefCell::new(BTreeMap::new()),
+            pools: RefCell::new(BTreeMap::new()),
             pots: RefCell::new(pots::Row::default()),
             slots: RefCell::new(BTreeMap::new()),
-            dreps: RefCell::new(HashMap::new()),
+            dreps: RefCell::new(BTreeMap::new()),
             proposals: RefCell::new(BTreeMap::new()),
+            cc_members: RefCell::new(BTreeMap::new()),
             p_params: RefCell::new(BTreeMap::new()),
+            era_history,
         }
     }
 }
 
 impl MemoryStore {
     pub fn new() -> Self {
-        Self {
-            utxos: RefCell::new(BTreeMap::new()),
-            accounts: RefCell::new(HashMap::<StakeCredential, Option<accounts::Row>>::new()),
-            pools: RefCell::new(HashMap::<PoolId, Option<pools::Row>>::new()),
-            pots: RefCell::new(pots::Row::default()),
-            slots: RefCell::new(BTreeMap::new()),
-            dreps: RefCell::new(HashMap::<StakeCredential, Option<dreps::Row>>::new()),
-            proposals: RefCell::new(BTreeMap::<ProposalId, Option<proposals::Row>>::new()),
-            p_params: RefCell::new(BTreeMap::new()),
-        }
+        Self::default()
     }
 }
 
@@ -354,9 +353,9 @@ impl<'a> TransactionalContext<'a> for MemoryTransactionalContext<'a> {
 
     fn save(
         &self,
-        _point: &Point,
-        _issuer: Option<&crate::store::columns::pools::Key>,
-        _add: crate::store::Columns<
+        point: &Point,
+        issuer: Option<&crate::store::columns::pools::Key>,
+        add: crate::store::Columns<
             impl Iterator<
                 Item = (
                     crate::store::columns::utxo::Key,
@@ -389,7 +388,7 @@ impl<'a> TransactionalContext<'a> for MemoryTransactionalContext<'a> {
                 ),
             >,
         >,
-        _remove: crate::store::Columns<
+        remove: crate::store::Columns<
             impl Iterator<Item = crate::store::columns::utxo::Key>,
             impl Iterator<Item = (crate::store::columns::pools::Key, Epoch)>,
             impl Iterator<Item = crate::store::columns::accounts::Key>,
@@ -402,10 +401,103 @@ impl<'a> TransactionalContext<'a> for MemoryTransactionalContext<'a> {
             impl Iterator<Item = crate::store::columns::cc_members::Key>,
             impl Iterator<Item = crate::store::columns::proposals::Key>,
         >,
-        _withdrawals: impl Iterator<Item = crate::store::columns::accounts::Key>,
-        _voting_dreps: BTreeSet<StakeCredential>,
+        withdrawals: impl Iterator<Item = crate::store::columns::accounts::Key>,
+        voting_dreps: BTreeSet<StakeCredential>,
     ) -> Result<(), crate::store::StoreError> {
-        let _ = _add;
+        let current_tip = self.store.tip.borrow().clone();
+
+        match (point, current_tip) {
+            (Point::Specific(new, _), Some(Point::Specific(current, _))) if *new <= current => {
+                tracing::trace!(target: "event.store.memory", ?point, "save.point_already_known");
+                return Ok(());
+            }
+            _ => {
+                // Update tip
+                *self.store.tip.borrow_mut() = Some(point.clone());
+
+                // Add issuer to new slot row
+                if let Point::Specific(slot, _) = point {
+                    if let Some(issuer) = issuer {
+                        self.store
+                            .slots
+                            .borrow_mut()
+                            .insert(*slot, Some(crate::store::columns::slots::Row::new(*issuer)));
+                    }
+                }
+            }
+        }
+
+        // Insert added data into each respective column in the store
+        for (key, value) in add.utxo {
+            self.store.utxos.borrow_mut().insert(key, Some(value));
+        }
+
+        for value in add.pools {
+            self.store
+                .pools
+                .borrow_mut()
+                .insert(value.0.operator.clone(), value);
+        }
+
+        for (key, value) in add.accounts {
+            self.store.accounts.borrow_mut().insert(key, value);
+        }
+
+        for (key, value) in add.dreps {
+            self.store.dreps.borrow_mut().insert(key, value);
+        }
+
+        for (key, value) in add.cc_members {
+            self.store.cc_members.borrow_mut().insert(key, value);
+        }
+
+        for (key, value) in add.proposals {
+            self.store.proposals.borrow_mut().insert(key, Some(value));
+        }
+
+        // Delete removed data from each respective column in the store
+        for key in remove.utxo {
+            self.store.utxos.borrow_mut().remove(&key);
+        }
+
+        for (key, _epoch) in remove.pools {
+            self.store.pools.borrow_mut().remove(&key);
+        }
+
+        for key in remove.accounts {
+            self.store.accounts.borrow_mut().remove(&key);
+        }
+
+        for (key, _ptr) in remove.dreps {
+            self.store.dreps.borrow_mut().remove(&key);
+        }
+
+        for key in remove.cc_members {
+            self.store.cc_members.borrow_mut().remove(&key);
+        }
+
+        for key in remove.proposals {
+            self.store.proposals.borrow_mut().remove(&key);
+        }
+
+        // Reset rewards data for accounts on withdrawal
+        for key in withdrawals {
+            if let Some(Some(account)) = self.store.accounts.borrow_mut().get_mut(&key) {
+                account.rewards = 0;
+            }
+        }
+
+        // TODO: possibly optimize (This matches rocksDB functionality although may only be needed on epoch boundary)
+        for drep in voting_dreps {
+            let slot = point.slot_or_default();
+            let current_epoch = self
+                .era_history
+                .slot_to_epoch(slot)
+                .map_err(|err| StoreError::Internal(err.into()))?;
+            if let Some(Some(drep_row)) = self.store.dreps.borrow_mut().get_mut(&drep) {
+                drep_row.last_active_epoch = current_epoch;
+            }
+        }
         Ok(())
     }
 
@@ -527,16 +619,7 @@ impl Store for MemoryStore {
 
 impl HistoricalStores for MemoryStore {
     fn for_epoch(&self, _epoch: Epoch) -> Result<impl Snapshot, crate::store::StoreError> {
-        Ok(MemoryStore {
-            utxos: RefCell::new(BTreeMap::new()),
-            accounts: RefCell::new(HashMap::new()),
-            pools: RefCell::new(HashMap::new()),
-            pots: RefCell::new(pots::Row::default()),
-            slots: RefCell::new(BTreeMap::new()),
-            dreps: RefCell::new(HashMap::new()),
-            proposals: RefCell::new(BTreeMap::new()),
-            p_params: RefCell::new(BTreeMap::new()),
-        })
+        Ok(MemoryStore::default())
     }
 }
 
