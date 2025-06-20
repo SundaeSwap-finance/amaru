@@ -73,7 +73,7 @@ pub mod test {
     prop_cbor_roundtrip!(Row, any_row());
 
     prop_compose! {
-        fn any_row()(
+        pub fn any_row()(
             hot_credential in option::of(any_stake_credential()),
         ) -> Row {
             Row {
@@ -83,7 +83,7 @@ pub mod test {
     }
 
     prop_compose! {
-        fn any_stake_credential()(
+        pub fn any_stake_credential()(
             is_script in any::<bool>(),
             credential in any::<[u8; 28]>(),
         ) -> StakeCredential {

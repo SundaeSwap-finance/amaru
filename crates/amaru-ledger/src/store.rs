@@ -151,7 +151,7 @@ pub trait HistoricalStores {
     fn for_epoch(&self, epoch: Epoch) -> Result<impl Snapshot, StoreError>;
 }
 
-#[derive(Debug, PartialEq, Eq, minicbor::Encode, minicbor::Decode)]
+#[derive(Debug, PartialEq, Eq, minicbor::Encode, minicbor::Decode, Clone)]
 pub enum EpochTransitionProgress {
     #[n(0)]
     EpochEnded,

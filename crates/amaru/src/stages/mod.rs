@@ -385,24 +385,4 @@ mod tests {
 
         assert_eq!(8, stages.len());
     }
-
-    #[test]
-    fn bootstrap_inmem_detailed() {
-        let config = Config {
-            ledger_store: InMem,
-            chain_store: InMem,
-            ..Config::default()
-        };
-
-        match bootstrap(config, vec![]) {
-            Ok(stages) => {
-                println!("Bootstrap succeeded with {} stages", stages.len());
-                assert_eq!(8, stages.len());
-            }
-            Err(e) => {
-                eprintln!("Bootstrap failure reason: {:?}", e);
-                panic!("Bootstrap failed: {:?}", e);
-            }
-        }
-    }
 }
