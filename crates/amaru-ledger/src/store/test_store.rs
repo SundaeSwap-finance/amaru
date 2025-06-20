@@ -8,6 +8,7 @@ use crate::store::columns::{accounts, dreps, pots, proposals, slots};
 use crate::store::in_memory::MemoryStore;
 use crate::store::{Columns, StoreError};
 use crate::store::{ReadOnlyStore, TransactionalContext};
+use amaru_kernel::EraHistory;
 use amaru_kernel::TransactionOutput;
 use amaru_kernel::{
     Anchor, CertificatePointer, DRep, Hash, Point, PoolId, PoolParams, ProposalId, Slot,
@@ -146,6 +147,7 @@ pub struct SeededData {
 
 pub fn seed_store<'a, C: TransactionalContext<'a>>(
     context: &'a C,
+    era_history: &EraHistory,
 ) -> Result<SeededData, StoreError> {
     use diff_bind::Resettable;
 
@@ -193,15 +195,18 @@ pub fn seed_store<'a, C: TransactionalContext<'a>>(
     let deposit = drep_row.deposit;
     let registered_at = drep_row.registered_at;
 
+    let epoch = era_history
+        .slot_to_epoch(registered_at.transaction.slot)
+        .expect("Failed to convert slot to epoch");
+
     let drep_iter = std::iter::once((
         drep_key.clone(),
         (
             Resettable::Set(anchor),
             Some((deposit, registered_at)),
-            registered_at.epoch(), // Match logic in `last_interaction`
+            epoch,
         ),
     ));
-
     // Proposal
     /*let proposal_id = generate_proposal_id();
     let proposal_row = generate_proposal_row();
@@ -298,11 +303,11 @@ mod tests {
             (*Into::<&'static EraHistory>::into(NetworkName::Preprod)).clone();
 
         // Create a MemoryStore and transactional context
-        let store = MemoryStore::new(era_history);
+        let store = MemoryStore::new(era_history.clone());
         let context = MemoryTransactionalContext::new(&store);
 
         // Seed and test
-        let seeded_data = seed_store(&context).expect("seeding failed");
+        let seeded_data = seed_store(&context, &era_history).expect("seeding failed");
         test_read_only_store(&store, seeded_data).expect("read failed");
     }
 
@@ -312,7 +317,7 @@ mod tests {
         //use slot_arithmetic::testing::one_era;
         use tempfile::TempDir;
 
-        let temp_dir = TempDir::new().expect("failed to create temp dir");
+        //let temp_dir = TempDir::new().expect("failed to create temp dir");
         //let era_history = one_era();
 
         //let store = RocksDB::new(temp_dir.path(), &era_history).expect("failed to create RocksDB store");
