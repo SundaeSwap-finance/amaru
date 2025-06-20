@@ -433,14 +433,25 @@ impl<'a> TransactionalContext<'a> for MemoryTransactionalContext<'a> {
 
         // Pools
         for (pool_params, epoch) in add.pools {
-            let row = columns::pools::Row {
-                current_params: pool_params,
-                future_params: vec![],
+            let mut pools = self.store.pools.borrow_mut();
+            let key = pool_params.id.clone();
+
+            let updated_row = match pools.get(&key).cloned().flatten() {
+                Some(mut row) => {
+                    // existing pool → push new future_params
+                    row.future_params.push((Some(pool_params.clone()), epoch));
+                    row
+                }
+                None => {
+                    // new pool → insert current + push future_param with `None`
+                    columns::pools::Row {
+                        current_params: pool_params.clone(),
+                        future_params: vec![(None, epoch)],
+                    }
+                }
             };
-            self.store
-                .pools
-                .borrow_mut()
-                .insert(row.current_params.id.clone(), Some(row));
+
+            pools.insert(key, Some(updated_row));
         }
 
         // Accounts
@@ -484,37 +495,28 @@ impl<'a> TransactionalContext<'a> for MemoryTransactionalContext<'a> {
         }
 
         // Dreps
-        for (credential, (anchor_resettable, register, epoch)) in add.dreps {
+        for (credential, (anchor_resettable, register, _epoch)) in add.dreps {
             let mut dreps = self.store.dreps.borrow_mut();
-
             let existing = dreps.get(&credential).cloned().flatten();
-
-            let row = if let Some(mut row) = existing {
-                // Re-registration or update
+            let mut row = if let Some(mut row) = existing {
                 if let Some((deposit, registered_at)) = register {
-                    row.deposit = deposit;
                     row.registered_at = registered_at;
+                    row.deposit = deposit;
                     row.last_interaction = None;
-                } else {
-                    row.last_interaction = Some(epoch);
                 }
-
                 anchor_resettable.set_or_reset(&mut row.anchor);
                 Some(row)
             } else if let Some((deposit, registered_at)) = register {
-                // Brand new registration
-                let mut row = dreps::Row {
+                let mut row = columns::dreps::Row {
+                    anchor: None,
                     deposit,
                     registered_at,
-                    anchor: None,
                     last_interaction: None,
                     previous_deregistration: None,
                 };
-
                 anchor_resettable.set_or_reset(&mut row.anchor);
                 Some(row)
             } else {
-                // Logic error: new entry with no registration info
                 tracing::error!(
                     target: "store::dreps::add",
                     ?credential,
@@ -526,14 +528,37 @@ impl<'a> TransactionalContext<'a> for MemoryTransactionalContext<'a> {
             dreps.insert(credential, row);
         }
 
-        /*
+        // Voting drep interaction updates
+        for drep in voting_dreps {
+            let slot = point.slot_or_default();
+            let current_epoch = self
+                .store
+                .era_history
+                .slot_to_epoch(slot)
+                .map_err(|err| StoreError::Internal(err.into()))?;
+            if let Some(Some(drep_row)) = self.store.dreps.borrow_mut().get_mut(&drep) {
+                drep_row.last_interaction = Some(current_epoch);
+            }
+        }
+        // cc_members
         for (key, value) in add.cc_members {
-            self.store.cc_members.borrow_mut().insert(key, value);
+            let row = match value {
+                Resettable::Set(cred) => Some(columns::cc_members::Row {
+                    hot_credential: Some(cred),
+                }),
+                Resettable::Reset => None,
+                Resettable::Unchanged => {
+                    self.store.cc_members.borrow().get(&key).cloned().flatten()
+                }
+            };
+
+            self.store.cc_members.borrow_mut().insert(key, row);
         }
 
+        /*
         for (key, value) in add.proposals {
             self.store.proposals.borrow_mut().insert(key, Some(value));
-        }
+        }*/
 
         // Delete removed data from each respective column in the store
         for key in remove.utxo {
@@ -548,17 +573,20 @@ impl<'a> TransactionalContext<'a> for MemoryTransactionalContext<'a> {
             self.store.accounts.borrow_mut().remove(&key);
         }
 
-        for (key, _ptr) in remove.dreps {
-            self.store.dreps.borrow_mut().remove(&key);
+        for (key, ptr) in remove.dreps {
+            if let Some(Some(row)) = self.store.dreps.borrow_mut().get_mut(&key) {
+                row.previous_deregistration = Some(ptr);
+            }
         }
 
         for key in remove.cc_members {
             self.store.cc_members.borrow_mut().remove(&key);
         }
 
+        /*
         for key in remove.proposals {
             self.store.proposals.borrow_mut().remove(&key);
-        }
+        }*/
 
         // Reset rewards data for accounts on withdrawal
         for key in withdrawals {
@@ -567,18 +595,6 @@ impl<'a> TransactionalContext<'a> for MemoryTransactionalContext<'a> {
             }
         }
 
-        // TODO: possibly optimize (This matches rocksDB functionality although may only be needed on epoch boundary)
-        for drep in voting_dreps {
-            let slot = point.slot_or_default();
-            let current_epoch = self
-                .store
-                .era_history
-                .slot_to_epoch(slot)
-                .map_err(|err| StoreError::Internal(err.into()))?;
-            if let Some(Some(drep_row)) = self.store.dreps.borrow_mut().get_mut(&drep) {
-                drep_row.last_interaction = Some(current_epoch);
-            }
-        }*/
         Ok(())
     }
 

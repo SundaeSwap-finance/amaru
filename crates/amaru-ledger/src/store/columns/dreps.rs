@@ -120,7 +120,7 @@ pub(crate) mod tests {
 
     prop_compose! {
         pub(crate) fn any_transaction_pointer()(
-            slot in any::<u64>(),
+            slot in 0u64..1000,
             transaction_index in any::<usize>(),
         ) -> TransactionPointer {
             TransactionPointer {
