@@ -7,15 +7,15 @@ use crate::{
     },
 };
 use amaru_kernel::{
-    network::NetworkName, protocol_parameters::ProtocolParameters, CertificatePointer, EraHistory,
-    Lovelace, Point, PoolId, ProposalId, Slot, StakeCredential, TransactionInput,
+    network::NetworkName, protocol_parameters::ProtocolParameters, EraHistory, Lovelace, Point,
+    PoolId, ProposalId, Slot, StakeCredential, TransactionInput,
 };
 
 use slot_arithmetic::Epoch;
 use std::{
     borrow::{Borrow, BorrowMut},
     cell::{RefCell, RefMut},
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, HashSet},
     ops::{Deref, DerefMut},
 };
 
@@ -324,18 +324,31 @@ impl<'a> TransactionalContext<'a> for MemoryTransactionalContext<'a> {
 
     fn try_epoch_transition(
         &self,
-        _from: Option<EpochTransitionProgress>,
-        _to: Option<EpochTransitionProgress>,
+        from: Option<EpochTransitionProgress>,
+        to: Option<EpochTransitionProgress>,
     ) -> Result<bool, StoreError> {
+        let mut progress = self.store.epoch_progress.borrow_mut();
+
+        if *progress != from {
+            return Ok(false);
+        }
+        *progress = to;
         Ok(true)
     }
 
     fn refund(
         &self,
-        _credential: &crate::store::columns::accounts::Key,
-        _deposit: Lovelace,
+        credential: &crate::store::columns::accounts::Key,
+        deposit: Lovelace,
     ) -> Result<Lovelace, StoreError> {
-        Ok(0)
+        let mut accounts = self.store.accounts.borrow_mut();
+        match accounts.get_mut(credential) {
+            Some(Some(account)) => {
+                account.deposit += deposit;
+                Ok(0)
+            }
+            _ => Ok(deposit),
+        }
     }
 
     fn set_protocol_parameters(
@@ -495,26 +508,42 @@ impl<'a> TransactionalContext<'a> for MemoryTransactionalContext<'a> {
         }
 
         // Dreps
-        for (credential, (anchor_resettable, register, _epoch)) in add.dreps {
+        let dreps_vec: Vec<_> = add.dreps.collect();
+
+        // Track which DReps are freshly registered
+        let newly_registered: HashSet<_> = dreps_vec
+            .iter()
+            .filter_map(|(cred, (_, register, _))| {
+                if register.is_some() {
+                    Some(cred.clone())
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        // Apply DRep rows to store
+        for (credential, (anchor_resettable, register, _epoch)) in &dreps_vec {
             let mut dreps = self.store.dreps.borrow_mut();
-            let existing = dreps.get(&credential).cloned().flatten();
-            let mut row = if let Some(mut row) = existing {
+            let existing = dreps.get(credential).cloned().flatten();
+
+            let row = if let Some(mut row) = existing {
                 if let Some((deposit, registered_at)) = register {
-                    row.registered_at = registered_at;
-                    row.deposit = deposit;
+                    row.registered_at = *registered_at;
+                    row.deposit = *deposit;
                     row.last_interaction = None;
                 }
-                anchor_resettable.set_or_reset(&mut row.anchor);
+                anchor_resettable.clone().set_or_reset(&mut row.anchor);
                 Some(row)
             } else if let Some((deposit, registered_at)) = register {
                 let mut row = columns::dreps::Row {
                     anchor: None,
-                    deposit,
-                    registered_at,
+                    deposit: *deposit,
+                    registered_at: *registered_at,
                     last_interaction: None,
                     previous_deregistration: None,
                 };
-                anchor_resettable.set_or_reset(&mut row.anchor);
+                anchor_resettable.clone().set_or_reset(&mut row.anchor);
                 Some(row)
             } else {
                 tracing::error!(
@@ -525,17 +554,22 @@ impl<'a> TransactionalContext<'a> for MemoryTransactionalContext<'a> {
                 None
             };
 
-            dreps.insert(credential, row);
+            dreps.insert(credential.clone(), row);
         }
 
-        // Voting drep interaction updates
+        // Update last_interaction for voting DReps, skipping newly registered ones
         for drep in voting_dreps {
+            if newly_registered.contains(&drep) {
+                continue;
+            }
+
             let slot = point.slot_or_default();
             let current_epoch = self
                 .store
                 .era_history
                 .slot_to_epoch(slot)
                 .map_err(|err| StoreError::Internal(err.into()))?;
+
             if let Some(Some(drep_row)) = self.store.dreps.borrow_mut().get_mut(&drep) {
                 drep_row.last_interaction = Some(current_epoch);
             }
@@ -573,10 +607,8 @@ impl<'a> TransactionalContext<'a> for MemoryTransactionalContext<'a> {
             self.store.accounts.borrow_mut().remove(&key);
         }
 
-        for (key, ptr) in remove.dreps {
-            if let Some(Some(row)) = self.store.dreps.borrow_mut().get_mut(&key) {
-                row.previous_deregistration = Some(ptr);
-            }
+        for (key, _) in remove.dreps {
+            self.store.dreps.borrow_mut().remove(&key);
         }
 
         for key in remove.cc_members {
@@ -729,698 +761,11 @@ impl MemoryStore {
             .get(credential)
             .and_then(|opt| opt.clone())
     }
-}
-/*
-#[cfg(test)]
-mod in_memory_tests {
-    use super::*;
-    use amaru_kernel::{
-        protocol_parameters::{
-            CostModels, DrepThresholds, PoolThresholds, Prices, ProtocolParametersThresholds,
-        },
-        Bytes, CertificatePointer, ExUnits, Hash, Nullable, PostAlonzoTransactionOutput,
-        PseudoTransactionOutput, RationalNumber, TransactionInput, TransactionPointer, Value,
-    };
 
-    fn dummy_post_alonzo_output() -> PostAlonzoTransactionOutput {
-        PostAlonzoTransactionOutput {
-            address: Bytes::from(vec![0u8; 32]),
-            value: Value::Coin(0),
-            datum_option: None,
-            script_ref: None,
-        }
-    }
-
-    fn dummy_account_row() -> accounts::Row {
-        accounts::Row {
-            delegatee: None,
-            deposit: 1000,
-            drep: None,
-            rewards: 500,
-        }
-    }
-
-    fn dummy_account_row2() -> accounts::Row {
-        accounts::Row {
-            delegatee: None,
-            deposit: 3000,
-            drep: None,
-            rewards: 200,
-        }
-    }
-
-    fn dummy_pool_row() -> Option<pools::Row> {
-        use amaru_kernel::{Nullable, PoolParams, Set, UnitInterval};
-        let dummy_pool_params = PoolParams {
-            id: Hash::new([0u8; 28]),
-            vrf: Hash::new([0u8; 32]),
-            pledge: 0,
-            cost: 0,
-            margin: UnitInterval {
-                numerator: 0,
-                denominator: 1,
-            },
-            reward_account: Bytes::from(vec![0u8; 32]),
-            owners: Set::from(vec![Hash::from([0u8; 28])]),
-            relays: Vec::new(),
-            metadata: Nullable::Null,
-        };
-
-        Some(pools::Row {
-            current_params: dummy_pool_params,
-            future_params: Vec::new(),
-        })
-    }
-
-    fn dummy_pot() -> pots::Row {
-        pots::Row {
-            treasury: 1,
-            reserves: 2,
-            fees: 3,
-        }
-    }
-
-    fn dummy_stake_credential() -> StakeCredential {
-        StakeCredential::AddrKeyhash(Hash::new([0u8; 28]))
-    }
-
-    fn dummy_stake_credential2() -> StakeCredential {
-        StakeCredential::AddrKeyhash(Hash::new([1u8; 28]))
-    }
-
-    fn dummy_drep_row() -> dreps::Row {
-        dreps::Row {
-            deposit: 500000000,
-            anchor: None,
-            registered_at: CertificatePointer {
-                transaction: TransactionPointer {
-                    slot: 100u64.into(),
-                    transaction_index: 1,
-                },
-                certificate_index: 0,
-            },
-            last_interaction: None,
-            previous_deregistration: None,
-        }
-    }
-
-    fn dummy_drep_row2() -> dreps::Row {
-        dreps::Row {
-            deposit: 600000000,
-            anchor: None,
-            registered_at: CertificatePointer {
-                transaction: TransactionPointer {
-                    slot: 40u64.into(),
-                    transaction_index: 5,
-                },
-                certificate_index: 1,
-            },
-            last_interaction: None,
-            previous_deregistration: None,
-        }
-    }
-
-    fn dummy_protocol_parameters1() -> ProtocolParameters {
-        ProtocolParameters {
-            max_block_body_size: 65536,
-            max_tx_size: 16384,
-            max_header_size: 512,
-            max_tx_ex_units: ExUnits {
-                mem: 1_000_000,
-                steps: 1_000_000_000,
-            },
-            max_block_ex_units: ExUnits {
-                mem: 50_000_000,
-                steps: 5_000_000_000,
-            },
-            max_val_size: 10000,
-            max_collateral_inputs: 3,
-
-            // Economic group
-            min_fee_a: 44u64,
-            min_fee_b: 155381u64,
-            stake_credential_deposit: 2000000u64,
-            stake_pool_deposit: 500000000u64,
-            monetary_expansion_rate: RationalNumber {
-                numerator: 1u64,
-                denominator: 100u64,
-            },
-            treasury_expansion_rate: RationalNumber {
-                numerator: 1u64,
-                denominator: 1000u64,
-            },
-            coins_per_utxo_byte: 4310u64,
-            prices: Prices {
-                mem: RationalNumber {
-                    numerator: 1u64,
-                    denominator: 10u64,
-                },
-                step: RationalNumber {
-                    numerator: 1u64,
-                    denominator: 100u64,
-                },
-            },
-            min_fee_ref_script_coins_per_byte: RationalNumber {
-                numerator: 1u64,
-                denominator: 1000u64,
-            },
-            max_ref_script_size_per_tx: 10000,
-            max_ref_script_size_per_block: 50000,
-            ref_script_cost_stride: 500,
-            ref_script_cost_multiplier: RationalNumber {
-                numerator: 1u64,
-                denominator: 1u64,
-            },
-
-            // Technical group
-            max_epoch: 500u32,
-            optimal_stake_pools_count: 500,
-            pledge_influence: RationalNumber {
-                numerator: 3u64,
-                denominator: 10u64,
-            },
-            collateral_percentage: 150,
-            cost_models: CostModels {
-                plutus_v1: vec![1; 10],
-                plutus_v2: vec![2; 10],
-                plutus_v3: vec![3; 10],
-            },
-
-            // Governance group
-            pool_thresholds: PoolThresholds {
-                no_confidence: RationalNumber {
-                    numerator: 1,
-                    denominator: 5,
-                },
-                committee: RationalNumber {
-                    numerator: 1,
-                    denominator: 3,
-                },
-                committee_under_no_confidence: RationalNumber {
-                    numerator: 2,
-                    denominator: 5,
-                },
-                hard_fork: RationalNumber {
-                    numerator: 3,
-                    denominator: 4,
-                },
-                security_group: RationalNumber {
-                    numerator: 1,
-                    denominator: 2,
-                },
-            },
-            drep_thresholds: DrepThresholds {
-                no_confidence: RationalNumber {
-                    numerator: 1,
-                    denominator: 5,
-                }, // 20%
-                committee: RationalNumber {
-                    numerator: 1,
-                    denominator: 3,
-                }, // 33%
-                committee_under_no_confidence: RationalNumber {
-                    numerator: 2,
-                    denominator: 5,
-                }, // 40%
-                constitution: RationalNumber {
-                    numerator: 3,
-                    denominator: 4,
-                }, // 75%
-                hard_fork: RationalNumber {
-                    numerator: 1,
-                    denominator: 2,
-                }, // 50%
-                protocol_parameters: ProtocolParametersThresholds {
-                    network_group: RationalNumber {
-                        numerator: 1,
-                        denominator: 5,
-                    }, // 20%
-                    economic_group: RationalNumber {
-                        numerator: 1,
-                        denominator: 4,
-                    }, // 25%
-                    technical_group: RationalNumber {
-                        numerator: 1,
-                        denominator: 3,
-                    }, // 33%
-                    governance_group: RationalNumber {
-                        numerator: 1,
-                        denominator: 2,
-                    }, // 50%
-                },
-                treasury_withdrawal: RationalNumber {
-                    numerator: 1,
-                    denominator: 10,
-                }, // 10%
-            },
-            cc_min_size: 3,
-            cc_max_term_length: 20u32,
-            gov_action_lifetime: 10u32,
-            gov_action_deposit: 10000000u64,
-            drep_deposit: 2000000u64,
-            drep_expiry: 50u32,
-        }
-    }
-
-    fn dummy_protocol_parameters2() -> ProtocolParameters {
-        ProtocolParameters {
-            max_block_body_size: 65546,
-            max_tx_size: 16394,
-            max_header_size: 522,
-            max_tx_ex_units: ExUnits {
-                mem: 1_000_010,
-                steps: 1_000_000_010,
-            },
-            max_block_ex_units: ExUnits {
-                mem: 50_000_010,
-                steps: 5_000_000_010,
-            },
-            max_val_size: 10010,
-            max_collateral_inputs: 13,
-
-            min_fee_a: 54u64,
-            min_fee_b: 155391u64,
-            stake_credential_deposit: 2_000_010u64,
-            stake_pool_deposit: 500_000_010u64,
-            monetary_expansion_rate: RationalNumber {
-                numerator: 11u64,
-                denominator: 110u64,
-            },
-            treasury_expansion_rate: RationalNumber {
-                numerator: 11u64,
-                denominator: 1010u64,
-            },
-            coins_per_utxo_byte: 4320u64,
-            prices: Prices {
-                mem: RationalNumber {
-                    numerator: 11u64,
-                    denominator: 20u64,
-                },
-                step: RationalNumber {
-                    numerator: 11u64,
-                    denominator: 110u64,
-                },
-            },
-            min_fee_ref_script_coins_per_byte: RationalNumber {
-                numerator: 11u64,
-                denominator: 1010u64,
-            },
-            max_ref_script_size_per_tx: 10010,
-            max_ref_script_size_per_block: 50010,
-            ref_script_cost_stride: 510,
-            ref_script_cost_multiplier: RationalNumber {
-                numerator: 11u64,
-                denominator: 11u64,
-            },
-
-            max_epoch: 510u32,
-            optimal_stake_pools_count: 510,
-            pledge_influence: RationalNumber {
-                numerator: 13u64,
-                denominator: 20u64,
-            },
-            collateral_percentage: 160,
-            cost_models: CostModels {
-                plutus_v1: vec![1; 10],
-                plutus_v2: vec![2; 10],
-                plutus_v3: vec![3; 10],
-            },
-
-            pool_thresholds: PoolThresholds {
-                no_confidence: RationalNumber {
-                    numerator: 11,
-                    denominator: 15,
-                },
-                committee: RationalNumber {
-                    numerator: 11,
-                    denominator: 13,
-                },
-                committee_under_no_confidence: RationalNumber {
-                    numerator: 12,
-                    denominator: 15,
-                },
-                hard_fork: RationalNumber {
-                    numerator: 13,
-                    denominator: 14,
-                },
-                security_group: RationalNumber {
-                    numerator: 11,
-                    denominator: 12,
-                },
-            },
-            drep_thresholds: DrepThresholds {
-                no_confidence: RationalNumber {
-                    numerator: 11,
-                    denominator: 15,
-                },
-                committee: RationalNumber {
-                    numerator: 11,
-                    denominator: 13,
-                },
-                committee_under_no_confidence: RationalNumber {
-                    numerator: 12,
-                    denominator: 15,
-                },
-                constitution: RationalNumber {
-                    numerator: 13,
-                    denominator: 14,
-                },
-                hard_fork: RationalNumber {
-                    numerator: 11,
-                    denominator: 12,
-                },
-                protocol_parameters: ProtocolParametersThresholds {
-                    network_group: RationalNumber {
-                        numerator: 11,
-                        denominator: 15,
-                    },
-                    economic_group: RationalNumber {
-                        numerator: 11,
-                        denominator: 14,
-                    },
-                    technical_group: RationalNumber {
-                        numerator: 11,
-                        denominator: 13,
-                    },
-                    governance_group: RationalNumber {
-                        numerator: 11,
-                        denominator: 12,
-                    },
-                },
-                treasury_withdrawal: RationalNumber {
-                    numerator: 11,
-                    denominator: 20,
-                },
-            },
-            cc_min_size: 13,
-            cc_max_term_length: 30u32,
-            gov_action_lifetime: 20u32,
-            gov_action_deposit: 10_000_010u64,
-            drep_deposit: 2_000_010u64,
-            drep_expiry: 60u32,
-        }
-    }
-
-    #[test]
-    fn test_utxo_returns_dummy_output() {
-        let store = MemoryStore::new();
-
-        let txin = TransactionInput {
-            transaction_id: Hash::new([0u8; 32]),
-            index: 0,
-        };
-
-        let output = PseudoTransactionOutput::PostAlonzo(dummy_post_alonzo_output());
-
-        store.utxos.borrow_mut().insert(txin.clone(), Some(output));
-
-        let result = store.utxo(&txin).unwrap();
-
-        assert!(result.is_some(), "UTXO should be found");
-    }
-
-    #[test]
-    fn test_account_returns_correct_row() {
-        let store = MemoryStore::new();
-
-        let credential = dummy_stake_credential();
-
-        // Borrow mutably to insert the dummy account row
-        store
-            .accounts
-            .borrow_mut()
-            .insert(credential.clone(), Some(dummy_account_row()));
-
-        // Now call the method that reads immutably
-        let result = store.account(&credential).unwrap();
-
-        assert!(result.is_some());
-
-        let row = result.unwrap();
-        assert_eq!(row.deposit, 1000);
-        assert_eq!(row.rewards, 500);
-    }
-
-    #[test]
-    fn test_pool_returns_correct_row() {
-        let store = MemoryStore::new();
-
-        let pool_id = Hash::new([0u8; 28]);
-        let dummy_row = dummy_pool_row();
-
-        // Borrow mutably to insert the dummy row
-        store.pools.borrow_mut().insert(pool_id.clone(), dummy_row);
-
-        // Call the method that borrows immutably inside
-        let result = store.pool(&pool_id).unwrap();
-
-        assert!(result.is_some());
-
-        let row = result.unwrap();
-        assert_eq!(row.current_params.id, pool_id);
-        assert_eq!(row.current_params.pledge, 0);
-        assert_eq!(row.current_params.cost, 0);
-        assert_eq!(row.current_params.margin.numerator, 0);
-        assert_eq!(row.current_params.margin.denominator, 1);
-        assert_eq!(row.current_params.owners.to_vec().len(), 1);
-        assert!(row.current_params.relays.is_empty());
-        assert!(matches!(row.current_params.metadata, Nullable::Null));
-        assert!(row.future_params.is_empty());
-    }
-
-    #[test]
-    fn test_pots_returns_correct_data() {
-        let store = MemoryStore::new();
-        *store.pots.borrow_mut() = dummy_pot();
-
-        let result = store.pots().unwrap();
-
-        assert_eq!(result.treasury, 1);
-        assert_eq!(result.reserves, 2);
-        assert_eq!(result.fees, 3);
-    }
-
-    #[test]
-    fn test_iter_utxos_returns_inserted_utxos() {
-        let store = MemoryStore::new();
-
-        let txin1 = TransactionInput {
-            transaction_id: Hash::new([1u8; 32]),
-            index: 0,
-        };
-        let txin2 = TransactionInput {
-            transaction_id: Hash::new([2u8; 32]),
-            index: 1,
-        };
-
-        let output1 = PseudoTransactionOutput::PostAlonzo(dummy_post_alonzo_output());
-        let output2 = PseudoTransactionOutput::PostAlonzo(dummy_post_alonzo_output());
-
-        store
-            .utxos
-            .borrow_mut()
-            .insert(txin1.clone(), Some(output1.clone()));
-        store
-            .utxos
-            .borrow_mut()
-            .insert(txin2.clone(), Some(output2.clone()));
-
-        let results = store.iter_utxos().unwrap().collect::<Vec<_>>();
-
-        assert_eq!(results.len(), 2);
-
-        assert_eq!(results[0], (txin1.clone(), output1.clone()));
-        assert_eq!(results[1], (txin2.clone(), output2.clone()));
-    }
-
-    #[test]
-    fn test_iter_accounts_returns_inserted_accounts() {
-        let store = MemoryStore::new();
-
-        let stake_credential1 = dummy_stake_credential();
-        let stake_credential2 = dummy_stake_credential2();
-        let row1 = dummy_account_row();
-        let row2 = dummy_account_row2();
-
-        {
-            let mut accounts = store.accounts.borrow_mut();
-            accounts.insert(stake_credential1.clone(), Some(row1.clone()));
-            accounts.insert(stake_credential2.clone(), Some(row2.clone()));
-        }
-
-        let mut results = store.iter_accounts().unwrap().collect::<Vec<_>>();
-        results.sort_by_key(|(k, _)| k.clone());
-
-        let mut expected = vec![(stake_credential1, row1), (stake_credential2, row2)];
-        expected.sort_by_key(|(k, _)| k.clone());
-
-        assert_eq!(results, expected);
-    }
-
-    #[test]
-    fn test_iter_dreps_returns_inserted_dreps() {
-        let store = MemoryStore::new();
-
-        let stake_credential1 = dummy_stake_credential();
-        let stake_credential2 = dummy_stake_credential2();
-        let row1 = dummy_drep_row();
-        let row2 = dummy_drep_row2();
-
-        store
-            .dreps
-            .borrow_mut()
-            .insert(stake_credential1.clone(), Some(row1.clone()));
-        store
-            .dreps
-            .borrow_mut()
-            .insert(stake_credential2.clone(), Some(row2.clone()));
-
-        let mut results = store.iter_dreps().unwrap().collect::<Vec<_>>();
-        results.sort_by_key(|(k, _)| k.clone());
-
-        let mut expected = vec![(stake_credential1, row1), (stake_credential2, row2)];
-        expected.sort_by_key(|(k, _)| k.clone());
-
-        assert_eq!(results, expected);
-    }
-
-    fn dummy_proposal_id1() -> ProposalId {
-        ProposalId {
-            transaction_id: Hash::<32>::from([1u8; 32]),
-            action_index: 0,
-        }
-    }
-
-    fn dummy_proposal_id2() -> ProposalId {
-        ProposalId {
-            transaction_id: Hash::<32>::from([1u8; 32]),
-            action_index: 1,
-        }
-    }
-
-    fn dummy_proposal_row1() -> proposals::Row {
-        proposals::Row {
-            proposed_in: ProposalPointer {
-                transaction: TransactionPointer {
-                    slot: 40u64.into(),
-                    transaction_index: 1,
-                },
-                proposal_index: 21,
-            },
-            valid_until: 40u64.into(),
-            proposal: Proposal {
-                deposit: 100,
-                reward_account: Bytes::from(vec![0u8; 32]),
-                gov_action: GovAction::NoConfidence(Nullable::Some(amaru_kernel::ProposalId {
-                    transaction_id: Hash::new([0u8; 32]),
-                    action_index: 0,
-                })),
-
-                anchor: Anchor {
-                    url: "https://example.com/dummy_anchor".to_string(),
-                    content_hash: Hash::new([0u8; 32]),
-                },
-            },
-        }
-    }
-
-    fn dummy_proposal_row2() -> proposals::Row {
-        proposals::Row {
-            proposed_in: ProposalPointer {
-                transaction: TransactionPointer {
-                    slot: 25u64.into(),
-                    transaction_index: 2,
-                },
-                proposal_index: 21,
-            },
-            valid_until: 47u64.into(),
-            proposal: Proposal {
-                deposit: 200,
-                reward_account: Bytes::from(vec![1u8; 32]),
-                gov_action: GovAction::NoConfidence(Nullable::Some(amaru_kernel::ProposalId {
-                    transaction_id: Hash::<32>::from([1u8; 32]),
-                    action_index: 0,
-                })),
-
-                anchor: Anchor {
-                    url: "https://example2.com/dummy_anchor".to_string(),
-                    content_hash: Hash::<32>::from([1u8; 32]),
-                },
-            },
-        }
-    }
-    // Test not working due to Ord not being implemented on ProposalId
-    #[test]
-    fn test_iter_proposals_returns_inserted_proposals() {
-        let mut store = MemoryStore::new();
-
-        let proposal_id1 = dummy_proposal_id1();
-        let proposal_id2 = dummy_proposal_id2();
-        let row1 = dummy_proposal_row1();
-        let row2 = dummy_proposal_row2();
-
-        store
-            .proposals
-            .borrow_mut()
-            .insert(proposal_id1.clone(), Some(row1.clone()));
-        store
-            .proposals
-            .borrow_mut()
-            .insert(proposal_id2.clone(), Some(row2.clone()));
-
-        let mut results = store.iter_proposals().unwrap().collect::<Vec<_>>();
-
-        let mut expected = vec![(proposal_id1, row1), (proposal_id2, row2)];
-
-        assert_eq!(results, expected);
-    }
-
-    #[test]
-    fn test_get_protocol_params_returns_params_for_correct_epoch() {
-        let store = MemoryStore::new();
-
-        let epoch1: Epoch = 1u64.into();
-        let epoch2: Epoch = 2u64.into();
-
-        let protocol_parameters1 = dummy_protocol_parameters1();
-        let protocol_parameters2 = dummy_protocol_parameters2();
-
-        store
-            .p_params
-            .borrow_mut()
-            .insert(epoch1.clone(), protocol_parameters1.clone());
-        store
-            .p_params
-            .borrow_mut()
-            .insert(epoch2.clone(), protocol_parameters2.clone());
-
-        let result1 = store.get_protocol_parameters_for(&epoch1);
-        assert_eq!(result1.unwrap(), protocol_parameters1);
-
-        let result2 = store.get_protocol_parameters_for(&epoch2);
-        assert_eq!(result2.unwrap(), protocol_parameters2);
-
-        let epoch3: Epoch = 3u64.into();
-        let result3 = store.get_protocol_parameters_for(&epoch3);
-        assert!(matches!(result3, ProtocolParamters::default()));
-    }
-
-    #[test]
-    fn test_set_protocol_params_inserts_params_for_correct_epoch() {
-        let store = MemoryStore::new();
-        let context = MemoryTransactionalContext { store: &store };
-
-        let epoch: Epoch = 1u64.into();
-
-        let protocol_parameters = dummy_protocol_parameters1();
-
-        context
-            .set_protocol_parameters(&epoch, &protocol_parameters)
-            .unwrap();
-
-        let result = store.get_protocol_parameters_for(&epoch).unwrap();
-
-        assert_eq!(result, protocol_parameters);
+    pub fn get_cc_member_for_test(&self, key: &StakeCredential) -> Option<cc_members::Row> {
+        self.cc_members
+            .borrow()
+            .get(key)
+            .and_then(|opt| opt.clone())
     }
 }
-*/
