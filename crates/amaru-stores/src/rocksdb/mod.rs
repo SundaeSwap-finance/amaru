@@ -524,6 +524,8 @@ impl TransactionalContext<'_> for RocksDBTransactionalContext<'_> {
 }
 
 impl Store for RocksDB {
+    type Transaction<'a> = RocksDBTransactionalContext<'a>;
+
     fn snapshots(&self) -> Result<Vec<Epoch>, StoreError> {
         RocksDB::snapshots(&self.dir)
     }
@@ -548,9 +550,8 @@ impl Store for RocksDB {
     }
 
     #[allow(clippy::panic)] // Expected
-    fn create_transaction(&self) -> impl TransactionalContext<'_> {
+    fn create_transaction(&self) -> Self::Transaction<'_> {
         if self.ongoing_transaction.get() {
-            // Thats a bug in the code, we should never have two transactions at the same time
             panic!("RocksDB already has an ongoing transaction");
         }
         let transaction = self.db.transaction();
@@ -606,5 +607,60 @@ impl Snapshot for RocksDBSnapshot {
 impl HistoricalStores for RocksDBHistoricalStores {
     fn for_epoch(&self, epoch: Epoch) -> Result<impl Snapshot, StoreError> {
         RocksDBHistoricalStores::for_epoch_with(&self.dir, epoch)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use amaru_kernel::network::NetworkName;
+    use amaru_kernel::EraHistory;
+    use slot_arithmetic::Epoch;
+    use tempfile::TempDir;
+
+    use crate::tests::{
+        add_test_data_to_store, test_epoch_transition, test_read_account, test_read_drep,
+        test_read_pool, test_read_utxo, test_refund_account, test_remove_account, test_remove_drep,
+        test_remove_pool, test_remove_utxo,
+    };
+    use amaru_ledger::store::{Store, StoreError, TransactionalContext};
+
+    use crate::rocksdb::RocksDB;
+
+    #[test]
+    fn test_rockdb_store() -> Result<(), StoreError> {
+        let era_history: EraHistory =
+            (*Into::<&'static EraHistory>::into(NetworkName::Preprod)).clone();
+        let tmp_dir = TempDir::new().expect("failed to create temp dir");
+
+        let store = RocksDB::empty(tmp_dir.path(), &era_history)
+            .map_err(|e| StoreError::Internal(e.into()))?;
+
+        {
+            let seeded = {
+                let context = store.create_transaction();
+                let seeded = add_test_data_to_store(&context, &era_history)
+                    .expect("adding data to store failed");
+                context.commit()?;
+                seeded
+            };
+
+            test_read_utxo(&store, &seeded);
+            test_read_account(&store, &seeded);
+            test_read_pool(&store, &seeded);
+            test_read_drep(&store, &seeded);
+
+            {
+                println!("Data successfully seeded to store");
+                test_refund_account(&store, &seeded)?;
+                println!("Refund account successful");
+                test_epoch_transition(&store)?;
+                //test_remove_utxo(&context, &store, &seeded);
+                //test_remove_account(&context, &store, &seeded)?;
+                //test_remove_pool(&context, &store, &seeded)?;
+                //test_remove_drep(&context, &store, &seeded)?;
+            }
+        }
+
+        Ok(())
     }
 }

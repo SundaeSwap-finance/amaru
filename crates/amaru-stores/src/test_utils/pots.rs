@@ -12,12 +12,25 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use amaru_kernel::{TransactionInput, TransactionOutput};
-use iter_borrow::IterBorrow;
+#[cfg(test)]
+pub(crate) mod test {
+    use amaru_kernel::{prop_cbor_roundtrip, Lovelace};
+    use amaru_ledger::store::columns::pots::Row;
+    use proptest::prelude::*;
 
-pub type Key = TransactionInput;
+    prop_cbor_roundtrip!(Row, any_row());
 
-pub type Value = TransactionOutput;
-
-/// Iterator used to browse rows from the Pools column. Meant to be referenced using qualified imports.
-pub type Iter<'a, 'b> = IterBorrow<'a, 'b, Key, Option<Value>>;
+    prop_compose! {
+        pub fn any_row()(
+            treasury in any::<Lovelace>(),
+            reserves in any::<Lovelace>(),
+            fees in any::<Lovelace>(),
+        ) -> Row {
+            Row {
+                treasury,
+                reserves,
+                fees,
+            }
+        }
+    }
+}
