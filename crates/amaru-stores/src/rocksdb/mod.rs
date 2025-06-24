@@ -614,7 +614,6 @@ impl HistoricalStores for RocksDBHistoricalStores {
 mod tests {
     use amaru_kernel::network::NetworkName;
     use amaru_kernel::EraHistory;
-    use slot_arithmetic::Epoch;
     use tempfile::TempDir;
 
     use crate::tests::{
@@ -622,7 +621,7 @@ mod tests {
         test_read_pool, test_read_utxo, test_refund_account, test_remove_account, test_remove_drep,
         test_remove_pool, test_remove_utxo,
     };
-    use amaru_ledger::store::{Store, StoreError, TransactionalContext};
+    use amaru_ledger::store::StoreError;
 
     use crate::rocksdb::RocksDB;
 
@@ -636,28 +635,20 @@ mod tests {
             .map_err(|e| StoreError::Internal(e.into()))?;
 
         {
-            let seeded = {
-                let context = store.create_transaction();
-                let seeded = add_test_data_to_store(&context, &era_history)
-                    .expect("adding data to store failed");
-                context.commit()?;
-                seeded
-            };
+            let seeded =
+                add_test_data_to_store(&store, &era_history).expect("adding data to store failed");
 
             test_read_utxo(&store, &seeded);
             test_read_account(&store, &seeded);
             test_read_pool(&store, &seeded);
             test_read_drep(&store, &seeded);
-
             {
-                println!("Data successfully seeded to store");
                 test_refund_account(&store, &seeded)?;
-                println!("Refund account successful");
                 test_epoch_transition(&store)?;
-                //test_remove_utxo(&context, &store, &seeded);
-                //test_remove_account(&context, &store, &seeded)?;
-                //test_remove_pool(&context, &store, &seeded)?;
-                //test_remove_drep(&context, &store, &seeded)?;
+                test_remove_utxo(&store, &seeded)?;
+                test_remove_account(&store, &seeded)?;
+                test_remove_pool(&store, &seeded)?;
+                test_remove_drep(&store, &seeded)?;
             }
         }
 

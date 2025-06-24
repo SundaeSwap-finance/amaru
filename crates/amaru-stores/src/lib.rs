@@ -23,8 +23,8 @@ pub mod tests {
     use std::collections::BTreeSet;
 
     use amaru_kernel::{
-        Anchor, EraHistory, Hash, Point, PoolId, PoolParams, Slot, StakeCredential,
-        TransactionInput, TransactionOutput,
+        Anchor, ComparableProposalId, EraHistory, Hash, Point, PoolId, PoolParams, Slot,
+        StakeCredential, TransactionInput, TransactionOutput,
     };
     use proptest::{prelude::Strategy, strategy::ValueTree, test_runner::TestRunner};
     use slot_arithmetic::Epoch;
@@ -35,7 +35,7 @@ pub mod tests {
             columns::{
                 accounts::{self},
                 cc_members::{self},
-                dreps,
+                dreps, proposals,
             },
             Columns, ReadOnlyStore, Store, StoreError, TransactionalContext,
         },
@@ -109,7 +109,7 @@ pub mod tests {
             .current()
     }
 
-    fn generate_new_drep_row() -> dreps::Row {
+    fn generate_drep_row() -> dreps::Row {
         let mut row = crate::test_utils::dreps::tests::any_row()
             .new_tree(&mut TestRunner::default())
             .unwrap()
@@ -130,21 +130,21 @@ pub mod tests {
         }
     }
 
-    /*
-    fn generate_proposal_id() -> ProposalId {
-        crate::store::proposals::tests::any_proposal_id()
-            .new_tree(&mut TestRunner::default())
-            .unwrap()
-            .current()
+    fn generate_proposal_id() -> ComparableProposalId {
+        ComparableProposalId::from(
+            crate::test_utils::proposals::tests::any_proposal_id()
+                .new_tree(&mut TestRunner::default())
+                .unwrap()
+                .current(),
+        )
     }
 
-    fn generate_proposal_row() -> proposals::Row {
-        crate::store::proposals::tests::any_row()
+    fn generate_proposal_row() -> amaru_ledger::store::columns::proposals::Row {
+        crate::test_utils::proposals::tests::any_row()
             .new_tree(&mut TestRunner::default())
             .unwrap()
             .current()
     }
-    */
 
     fn generate_cc_member_row() -> cc_members::Row {
         let mut runner = TestRunner::default();
@@ -175,16 +175,16 @@ pub mod tests {
         pub pool_epoch: Epoch,
         pub drep_key: StakeCredential,
         pub drep_row: dreps::Row,
-        //pub proposal_id: ProposalId,
-        //pub proposal_row: proposals::Row,
+        pub proposal_key: ComparableProposalId,
+        pub proposal_row: proposals::Row,
         //pub cc_member_key: StakeCredential,
         //pub cc_member_row: cc_members::Row,
         //pub slot_leader: PoolId,
         //pub point: Point,
     }
 
-    pub fn add_test_data_to_store<'a, C: TransactionalContext<'a>>(
-        context: &'a C,
+    pub fn add_test_data_to_store<'a>(
+        store: &impl Store,
         era_history: &EraHistory,
     ) -> Result<SeededData, StoreError> {
         use diff_bind::Resettable;
@@ -222,7 +222,7 @@ pub mod tests {
 
         // dreps
         let drep_key = generate_stake_credential();
-        let drep_row = generate_new_drep_row();
+        let drep_row = generate_drep_row();
 
         let anchor = drep_row.anchor.clone().expect("Expected anchor to be Some");
         let deposit = drep_row.deposit;
@@ -241,6 +241,12 @@ pub mod tests {
             ),
         ));
 
+        // proposals
+        let proposal_key = generate_proposal_id();
+        let proposal_row = generate_proposal_row();
+
+        let proposal_iter = std::iter::once((proposal_key.clone(), proposal_row));
+
         // cc_members
         let cc_member_key = generate_stake_credential();
         let cc_member_row = generate_cc_member_row();
@@ -256,33 +262,41 @@ pub mod tests {
         let slot = generate_slot();
         let point = Point::Specific(slot.into(), Hash::from([0u8; 32]).to_vec());
         let slot_leader = generate_pool_id();
-        context.save(
-            &point,
-            Some(&slot_leader),
-            Columns {
-                utxo: utxos_iter,
-                pools: pools_iter,
-                accounts: accounts_iter,
-                dreps: drep_iter,
-                cc_members: cc_members_iter,
-                proposals: std::iter::empty(),
-            },
-            Columns::empty(),
-            std::iter::empty(),
-            BTreeSet::new(),
-        )?;
+        {
+            let context = store.create_transaction();
 
-        // 🛠 Re-fetch the actual stored account row (especially important for RocksDB)
+            context.save(
+                &point,
+                Some(&slot_leader),
+                Columns {
+                    utxo: utxos_iter,
+                    pools: pools_iter,
+                    accounts: accounts_iter,
+                    dreps: drep_iter,
+                    cc_members: cc_members_iter,
+                    proposals: proposal_iter,
+                },
+                Columns::empty(),
+                std::iter::empty(),
+                BTreeSet::new(),
+            )?;
+
+            context.commit()?;
+        }
+
         let stored_account_row = {
+            let context = store.create_transaction();
             let mut result = None;
             context.with_accounts(|mut accounts| {
                 result = accounts
                     .find(|(key, _)| *key == account_key)
                     .and_then(|(_, row)| row.borrow().clone());
             })?;
-            result.ok_or_else(|| {
+            let value = result.ok_or_else(|| {
                 StoreError::Internal("Failed to retrieve account after seeding".into())
-            })?
+            })?;
+            context.commit()?;
+            value
         };
 
         Ok(SeededData {
@@ -294,6 +308,8 @@ pub mod tests {
             pool_epoch: epoch,
             drep_key,
             drep_row,
+            proposal_key,
+            proposal_row,
         })
     }
 
@@ -317,12 +333,6 @@ pub mod tests {
         assert!(
             stored_account.is_some(),
             "account not found in store for seeded key"
-        );
-
-        println!("seeded rewards: {}", seeded.account_row.rewards);
-        println!(
-            "stored rewards: {}",
-            stored_account.clone().unwrap().rewards
         );
 
         let stored_account = stored_account.unwrap();
@@ -416,13 +426,32 @@ pub mod tests {
         );
     }*/
 
-    // TODO: Implement Ord on ProposalId in pallas-primitives to allow proposals to be stored in memory
+    pub fn test_read_proposal(store: &impl Store, seeded: &SeededData) -> Result<(), StoreError> {
+        // Make sure the seeded proposal exists by scanning all proposals.
+        let proposals: Vec<_> = store
+            .iter_proposals()?
+            .filter(|(key, _)| *key == seeded.proposal_id)
+            .collect();
 
-    pub fn test_remove_utxo<'a>(
-        context: &'a impl TransactionalContext<'a>,
-        store: &impl ReadOnlyStore,
-        seeded: &SeededData,
-    ) {
+        assert_eq!(
+            proposals.len(),
+            1,
+            "Expected exactly one matching proposal in store"
+        );
+
+        let (key, row) = &proposals[0];
+        assert_eq!(key, &seeded.proposal_id, "Proposal ID mismatch");
+
+        // Optional: Add more specific checks on proposal row contents if needed
+        assert!(
+            row.governance_action.is_some(),
+            "Expected proposal to have a governance action"
+        );
+
+        Ok(())
+    }
+
+    pub fn test_remove_utxo<'a>(store: &impl Store, seeded: &SeededData) -> Result<(), StoreError> {
         let point = Point::Origin;
 
         let remove = Columns {
@@ -434,27 +463,28 @@ pub mod tests {
             proposals: std::iter::empty(),
         };
 
-        context
-            .save(
-                &point,
-                None,
-                Columns::empty(),
-                remove,
-                std::iter::empty(),
-                BTreeSet::new(),
-            )
-            .expect("utxo removal failed");
+        let context = store.create_transaction();
+        context.save(
+            &point,
+            None,
+            Columns::empty(),
+            remove,
+            std::iter::empty(),
+            BTreeSet::new(),
+        )?; // handle any error from save
+        context.commit()?;
 
         assert_eq!(
             store.utxo(&seeded.txin).expect("utxo lookup failed"),
             None,
             "utxo was not properly removed"
         );
+
+        Ok(())
     }
 
     pub fn test_remove_account<'a>(
-        context: &'a impl TransactionalContext<'a>,
-        store: &impl ReadOnlyStore,
+        store: &impl Store,
         seeded: &SeededData,
     ) -> Result<(), StoreError> {
         let point = Point::Origin;
@@ -468,6 +498,7 @@ pub mod tests {
             proposals: std::iter::empty(),
         };
 
+        let context = store.create_transaction();
         context.save(
             &point,
             None,
@@ -476,17 +507,14 @@ pub mod tests {
             std::iter::empty(),
             BTreeSet::new(),
         )?;
+        context.commit()?;
 
         assert_eq!(store.account(&seeded.account_key)?, None);
 
         Ok(())
     }
 
-    pub fn test_remove_pool<'a>(
-        context: &'a impl TransactionalContext<'a>,
-        store: &impl ReadOnlyStore,
-        seeded: &SeededData,
-    ) -> Result<(), StoreError> {
+    pub fn test_remove_pool<'a>(store: &impl Store, seeded: &SeededData) -> Result<(), StoreError> {
         let point = Point::Origin;
 
         let remove = Columns {
@@ -498,6 +526,7 @@ pub mod tests {
             proposals: std::iter::empty(),
         };
 
+        let context = store.create_transaction();
         context.save(
             &point,
             None,
@@ -506,17 +535,22 @@ pub mod tests {
             std::iter::empty(),
             BTreeSet::new(),
         )?;
+        context.commit()?;
 
-        assert_eq!(store.pool(&seeded.pool_params.id)?, None);
+        assert!(
+            store
+                .pool(&seeded.pool_params.id)?
+                .expect("Expected pool row")
+                .future_params
+                .iter()
+                .any(|(p, e)| p.is_none() && *e == seeded.pool_epoch),
+            "Expected pool to be scheduled for removal"
+        );
 
         Ok(())
     }
 
-    pub fn test_remove_drep<'a>(
-        context: &'a impl TransactionalContext<'a>,
-        store: &impl ReadOnlyStore,
-        seeded: &SeededData,
-    ) -> Result<(), StoreError> {
+    pub fn test_remove_drep<'a>(store: &impl Store, seeded: &SeededData) -> Result<(), StoreError> {
         let point = Point::Origin;
 
         let drep_registered_at = store
@@ -539,6 +573,7 @@ pub mod tests {
             "DRep not present before removal"
         );
 
+        let context = store.create_transaction();
         context.save(
             &point,
             None,
@@ -547,10 +582,22 @@ pub mod tests {
             std::iter::empty(),
             BTreeSet::new(),
         )?;
+        context.commit()?;
 
-        let drep_exists = store.iter_dreps()?.any(|(key, _)| key == seeded.drep_key);
+        let maybe_drep_row = store
+            .iter_dreps()?
+            .find(|(key, _)| *key == seeded.drep_key)
+            .map(|(_, row)| row);
 
-        assert!(!drep_exists, "DRep was not removed");
+        let drep_row = maybe_drep_row.ok_or_else(|| {
+            StoreError::Internal("DRep row not found after supposed deregistration".into())
+        })?;
+
+        assert_eq!(
+            drep_row.previous_deregistration,
+            Some(drep_registered_at),
+            "DRep was not marked as deregistered"
+        );
 
         Ok(())
     }
@@ -563,7 +610,6 @@ pub mod tests {
 
         let context = store.create_transaction();
 
-        // 1. Read rewards before
         let mut result = None;
         context.with_accounts(|mut accounts| {
             result = accounts
@@ -574,17 +620,10 @@ pub mod tests {
         let rewards_before =
             result.ok_or_else(|| StoreError::Internal("Missing account before refund".into()))?;
 
-        println!("Rewards before: {rewards_before}");
-
-        println!("Calling refund");
         let unrefunded = context.refund(&seeded.account_key, refund_amount)?;
         assert_eq!(unrefunded, 0, "Refund to existing account should succeed");
-
-        // 3. Commit once
         context.commit()?;
-        println!("Refund successful");
 
-        // 🟢 Rewards after
         let rewards_after = {
             let context = store.create_transaction();
             let mut result = None;
@@ -593,11 +632,10 @@ pub mod tests {
                     .find(|(key, _)| *key == seeded.account_key)
                     .and_then(|(_, row)| row.borrow().as_ref().map(|acc| acc.rewards));
             })?;
-            context.commit()?; // 🔥 Drop before using the result outside
+            context.commit()?;
 
             let value = result
                 .ok_or_else(|| StoreError::Internal("Missing account after refund".into()))?;
-            println!("Rewards after: {}", value);
             value
         };
 
@@ -607,7 +645,6 @@ pub mod tests {
             "Rewards should increase by refund amount"
         );
 
-        // ❓ Missing account refund
         {
             let unknown = generate_stake_credential();
             assert_ne!(unknown, seeded.account_key);
@@ -644,6 +681,7 @@ pub mod tests {
             !repeat,
             "Expected second transition from outdated state to fail"
         );
+        context.commit()?;
 
         Ok(())
     }
