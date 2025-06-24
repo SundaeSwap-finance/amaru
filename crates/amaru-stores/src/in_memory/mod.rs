@@ -1,6 +1,6 @@
 use amaru_kernel::{
-    network::NetworkName, protocol_parameters::ProtocolParameters, EraHistory, Lovelace, Point,
-    PoolId, ProposalId, Slot, StakeCredential, TransactionInput,
+    network::NetworkName, protocol_parameters::ProtocolParameters, ComparableProposalId,
+    EraHistory, Lovelace, Point, PoolId, ProposalId, Slot, StakeCredential, TransactionInput,
 };
 use amaru_ledger::{
     state::diff_bind::Resettable,
@@ -86,7 +86,7 @@ pub struct MemoryStore {
     pots: RefCell<pots::Row>,
     slots: RefCell<BTreeMap<Slot, Option<slots::Row>>>,
     dreps: RefCell<BTreeMap<StakeCredential, Option<dreps::Row>>>,
-    proposals: RefCell<BTreeMap<ProposalId, Option<proposals::Row>>>,
+    proposals: RefCell<BTreeMap<ComparableProposalId, Option<proposals::Row>>>,
     cc_members: RefCell<BTreeMap<StakeCredential, Option<cc_members::Row>>>,
     p_params: RefCell<BTreeMap<Epoch, ProtocolParameters>>,
     era_history: EraHistory,
@@ -297,7 +297,7 @@ impl ReadOnlyStore for MemoryStore {
             .filter_map(|(proposal_id, opt_row)| {
                 opt_row
                     .as_ref()
-                    .map(|row| (proposal_id.clone(), row.clone()))
+                    .map(|row| (ProposalId::from((*proposal_id).clone()), row.clone()))
             })
             .collect();
 
@@ -346,7 +346,7 @@ impl<'a> TransactionalContext<'a> for MemoryTransactionalContext<'a> {
         let mut accounts = self.store.accounts.borrow_mut();
         match accounts.get_mut(credential) {
             Some(Some(account)) => {
-                account.deposit += deposit;
+                account.rewards += deposit;
                 Ok(0)
             }
             _ => Ok(deposit),
@@ -587,36 +587,59 @@ impl<'a> TransactionalContext<'a> for MemoryTransactionalContext<'a> {
             self.store.cc_members.borrow_mut().insert(key, row);
         }
 
-        /*
-        for (key, value) in add.proposals {
+        for (proposal_id, value) in add.proposals {
+            let key = ComparableProposalId::from(proposal_id);
             self.store.proposals.borrow_mut().insert(key, Some(value));
-        }*/
+        }
 
         // Delete removed data from each respective column in the store
         for key in remove.utxo {
             self.store.utxos.borrow_mut().remove(&key);
         }
 
-        for (key, _epoch) in remove.pools {
-            self.store.pools.borrow_mut().remove(&key);
+        for (pool_id, epoch) in remove.pools {
+            let mut pools = self.store.pools.borrow_mut();
+
+            match pools.get_mut(&pool_id) {
+                Some(Some(row)) => {
+                    row.future_params.push((None, epoch));
+                }
+                Some(None) => {}
+                None => {}
+            }
         }
 
         for key in remove.accounts {
             self.store.accounts.borrow_mut().remove(&key);
         }
 
-        for (key, _) in remove.dreps {
-            self.store.dreps.borrow_mut().remove(&key);
+        for (credential, pointer) in remove.dreps {
+            let mut dreps = self.store.dreps.borrow_mut();
+
+            match dreps.get_mut(&credential) {
+                Some(Some(row)) => {
+                    row.previous_deregistration = Some(pointer);
+                }
+                Some(None) | None => {
+                    tracing::error!(
+                        target: "store::dreps::remove",
+                        ?credential,
+                        "remove.unknown_drep",
+                    );
+                }
+            }
         }
 
         for key in remove.cc_members {
             self.store.cc_members.borrow_mut().remove(&key);
         }
 
-        /*
         for key in remove.proposals {
-            self.store.proposals.borrow_mut().remove(&key);
-        }*/
+            self.store
+                .proposals
+                .borrow_mut()
+                .remove(&ComparableProposalId::from(key));
+        }
 
         // Reset rewards data for accounts on withdrawal
         for key in withdrawals {
@@ -718,7 +741,7 @@ impl<'a> TransactionalContext<'a> for MemoryTransactionalContext<'a> {
         let mut proposals = self.store.proposals.borrow_mut();
 
         let iter = proposals.iter_mut().map(|(k, v)| {
-            let key = k.clone();
+            let key = ProposalId::from(k.clone());
             let boxed: Box<dyn BorrowMut<Option<proposals::Row>>> =
                 Box::new(RefMutAdapterMut::new(v));
             (key, boxed)
@@ -754,32 +777,16 @@ impl HistoricalStores for MemoryStore {
 }
 
 #[cfg(test)]
-impl MemoryStore {
-    pub fn get_drep_for_test(&self, credential: &StakeCredential) -> Option<dreps::Row> {
-        self.dreps
-            .borrow()
-            .get(credential)
-            .and_then(|opt| opt.clone())
-    }
-
-    pub fn get_cc_member_for_test(&self, key: &StakeCredential) -> Option<cc_members::Row> {
-        self.cc_members
-            .borrow()
-            .get(key)
-            .and_then(|opt| opt.clone())
-    }
-}
-
-#[cfg(test)]
 mod tests {
     use amaru_kernel::network::NetworkName;
     use amaru_kernel::EraHistory;
 
-    use crate::in_memory::{MemoryStore, MemoryTransactionalContext};
+    use crate::in_memory::MemoryStore;
     use crate::tests::{
         add_test_data_to_store, test_epoch_transition, test_read_account, test_read_drep,
-        test_read_pool, test_read_utxo, test_refund_account, test_remove_account, test_remove_drep,
-        test_remove_pool, test_remove_utxo,
+        test_read_pool, test_read_proposal, test_read_utxo, test_refund_account,
+        test_remove_account, test_remove_drep, test_remove_pool, test_remove_proposal,
+        test_remove_utxo,
     };
     use amaru_ledger::store::StoreError;
 
@@ -788,31 +795,31 @@ mod tests {
         let era_history: EraHistory =
             (*Into::<&'static EraHistory>::into(NetworkName::Preprod)).clone();
         let store = MemoryStore::new(era_history.clone());
-        let context = MemoryTransactionalContext::new(&store);
 
+        // Add to store test
         let seeded =
-            add_test_data_to_store(&context, &era_history).expect("adding data to store failed");
+            add_test_data_to_store(&store, &era_history).expect("adding data to store failed");
 
-        // Verify seeded data can be read back correctly
+        // Validate add to store & read tests
         test_read_utxo(&store, &seeded);
         test_read_account(&store, &seeded);
         test_read_pool(&store, &seeded);
         test_read_drep(&store, &seeded);
-        //test_read_cc_member(&store, &seeded);
-        //test_read_proposal(&store, &seeded);
+        test_read_proposal(&store, &seeded);
+        // TODO: Add cc_members iterator to validate getting stored cc_member works as intended
 
-        // Verify store updates through context
-        //test_refund_account(&context, &seeded)?;
-        //test_epoch_transition(&context)?;
-        //test_slot_updated(&store, &seeded);
+        // Transactional tests
+        test_refund_account(&store, &seeded)?;
+        test_epoch_transition(&store)?;
+        // TODO: Add slots iterator to validate slot is properly updated on save
 
-        // Verify removal of seeded data
-        test_remove_utxo(&context, &store, &seeded);
-        test_remove_account(&context, &store, &seeded)?;
-        test_remove_pool(&context, &store, &seeded)?;
-        test_remove_drep(&context, &store, &seeded)?;
-        //test_remove_cc_member(&context, &store, &seeded);
-        //test_remove_proposal(&context, &store, &seeded);
+        // Validate removal tests
+        test_remove_utxo(&store, &seeded)?;
+        test_remove_account(&store, &seeded)?;
+        test_remove_pool(&store, &seeded)?;
+        test_remove_drep(&store, &seeded)?;
+        test_remove_proposal(&store, &seeded)?;
+        // TODO: Add cc_members iterator to validate removal works as intended
 
         Ok(())
     }

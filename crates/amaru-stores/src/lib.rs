@@ -23,8 +23,8 @@ pub mod tests {
     use std::collections::BTreeSet;
 
     use amaru_kernel::{
-        Anchor, ComparableProposalId, EraHistory, Hash, Point, PoolId, PoolParams, Slot,
-        StakeCredential, TransactionInput, TransactionOutput,
+        Anchor, EraHistory, Hash, Point, PoolId, PoolParams, ProposalId, Slot, StakeCredential,
+        TransactionInput, TransactionOutput,
     };
     use proptest::{prelude::Strategy, strategy::ValueTree, test_runner::TestRunner};
     use slot_arithmetic::Epoch;
@@ -130,13 +130,11 @@ pub mod tests {
         }
     }
 
-    fn generate_proposal_id() -> ComparableProposalId {
-        ComparableProposalId::from(
-            crate::test_utils::proposals::tests::any_proposal_id()
-                .new_tree(&mut TestRunner::default())
-                .unwrap()
-                .current(),
-        )
+    fn generate_proposal_id() -> ProposalId {
+        crate::test_utils::proposals::tests::any_proposal_id()
+            .new_tree(&mut TestRunner::default())
+            .unwrap()
+            .current()
     }
 
     fn generate_proposal_row() -> amaru_ledger::store::columns::proposals::Row {
@@ -175,7 +173,7 @@ pub mod tests {
         pub pool_epoch: Epoch,
         pub drep_key: StakeCredential,
         pub drep_row: dreps::Row,
-        pub proposal_key: ComparableProposalId,
+        pub proposal_key: ProposalId,
         pub proposal_row: proposals::Row,
         //pub cc_member_key: StakeCredential,
         //pub cc_member_row: cc_members::Row,
@@ -245,7 +243,7 @@ pub mod tests {
         let proposal_key = generate_proposal_id();
         let proposal_row = generate_proposal_row();
 
-        let proposal_iter = std::iter::once((proposal_key.clone(), proposal_row));
+        let proposal_iter = std::iter::once((proposal_key.clone(), proposal_row.clone()));
 
         // cc_members
         let cc_member_key = generate_stake_credential();
@@ -426,29 +424,32 @@ pub mod tests {
         );
     }*/
 
-    pub fn test_read_proposal(store: &impl Store, seeded: &SeededData) -> Result<(), StoreError> {
-        // Make sure the seeded proposal exists by scanning all proposals.
-        let proposals: Vec<_> = store
-            .iter_proposals()?
-            .filter(|(key, _)| *key == seeded.proposal_id)
-            .collect();
+    pub fn test_read_proposal(store: &impl Store, seeded: &SeededData) {
+        let stored_proposal = store
+            .iter_proposals()
+            .expect("failed to iterate proposals")
+            .find(|(key, _)| key == &seeded.proposal_key)
+            .map(|(_, row)| row);
+
+        assert!(
+            stored_proposal.is_some(),
+            "proposal not found in store for seeded key"
+        );
+
+        let stored_proposal = stored_proposal.unwrap();
 
         assert_eq!(
-            proposals.len(),
-            1,
-            "Expected exactly one matching proposal in store"
+            stored_proposal.proposed_in, seeded.proposal_row.proposed_in,
+            "proposal proposed_in mismatch"
         );
-
-        let (key, row) = &proposals[0];
-        assert_eq!(key, &seeded.proposal_id, "Proposal ID mismatch");
-
-        // Optional: Add more specific checks on proposal row contents if needed
-        assert!(
-            row.governance_action.is_some(),
-            "Expected proposal to have a governance action"
+        assert_eq!(
+            stored_proposal.valid_until, seeded.proposal_row.valid_until,
+            "proposal valid_until mismatch"
         );
-
-        Ok(())
+        assert_eq!(
+            stored_proposal.proposal, seeded.proposal_row.proposal,
+            "proposal data mismatch"
+        );
     }
 
     pub fn test_remove_utxo<'a>(store: &impl Store, seeded: &SeededData) -> Result<(), StoreError> {
@@ -597,6 +598,51 @@ pub mod tests {
             drep_row.previous_deregistration,
             Some(drep_registered_at),
             "DRep was not marked as deregistered"
+        );
+
+        Ok(())
+    }
+
+    pub fn test_remove_proposal<'a>(
+        store: &impl Store,
+        seeded: &SeededData,
+    ) -> Result<(), StoreError> {
+        let point = Point::Origin;
+
+        let proposal_id = seeded.proposal_key.clone();
+
+        // Ensure proposal is present before removal
+        assert!(
+            store.iter_proposals()?.any(|(key, _)| key == proposal_id),
+            "Proposal not present before removal"
+        );
+
+        // Remove the proposal
+        let remove = Columns {
+            utxo: std::iter::empty(),
+            pools: std::iter::empty(),
+            accounts: std::iter::empty(),
+            dreps: std::iter::empty(),
+            cc_members: std::iter::empty(),
+            proposals: std::iter::once(proposal_id.clone()),
+        };
+
+        let context = store.create_transaction();
+        context.save(
+            &point,
+            None,
+            Columns::empty(),
+            remove,
+            std::iter::empty(),
+            BTreeSet::new(),
+        )?;
+        context.commit()?;
+
+        let proposal_still_exists = store.iter_proposals()?.any(|(key, _)| key == proposal_id);
+
+        assert!(
+            !proposal_still_exists,
+            "Proposal was not deleted from store"
         );
 
         Ok(())

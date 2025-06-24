@@ -618,8 +618,9 @@ mod tests {
 
     use crate::tests::{
         add_test_data_to_store, test_epoch_transition, test_read_account, test_read_drep,
-        test_read_pool, test_read_utxo, test_refund_account, test_remove_account, test_remove_drep,
-        test_remove_pool, test_remove_utxo,
+        test_read_pool, test_read_proposal, test_read_utxo, test_refund_account,
+        test_remove_account, test_remove_drep, test_remove_pool, test_remove_proposal,
+        test_remove_utxo,
     };
     use amaru_ledger::store::StoreError;
 
@@ -635,21 +636,30 @@ mod tests {
             .map_err(|e| StoreError::Internal(e.into()))?;
 
         {
+            // Add to store test
             let seeded =
                 add_test_data_to_store(&store, &era_history).expect("adding data to store failed");
 
+            // Validate add to store & read tests
             test_read_utxo(&store, &seeded);
             test_read_account(&store, &seeded);
             test_read_pool(&store, &seeded);
             test_read_drep(&store, &seeded);
-            {
-                test_refund_account(&store, &seeded)?;
-                test_epoch_transition(&store)?;
-                test_remove_utxo(&store, &seeded)?;
-                test_remove_account(&store, &seeded)?;
-                test_remove_pool(&store, &seeded)?;
-                test_remove_drep(&store, &seeded)?;
-            }
+            test_read_proposal(&store, &seeded);
+            // TODO: Add cc_members iterator to validate getting stored cc_member works as intended
+
+            // Transactional tests
+            test_refund_account(&store, &seeded)?;
+            test_epoch_transition(&store)?;
+            // TODO: Add slots iterator to validate slot is properly updated on save
+
+            // Validate removal tests
+            test_remove_utxo(&store, &seeded)?;
+            test_remove_account(&store, &seeded)?;
+            test_remove_pool(&store, &seeded)?;
+            test_remove_drep(&store, &seeded)?;
+            test_remove_proposal(&store, &seeded)?;
+            // TODO: Add cc_members iterator to validate removal works as intended
         }
 
         Ok(())
