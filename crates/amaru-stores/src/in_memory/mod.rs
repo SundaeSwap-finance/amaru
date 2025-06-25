@@ -1,6 +1,7 @@
 use amaru_kernel::{
     network::NetworkName, protocol_parameters::ProtocolParameters, ComparableProposalId,
     EraHistory, Lovelace, Point, PoolId, ProposalId, Slot, StakeCredential, TransactionInput,
+    TransactionOutput,
 };
 use amaru_ledger::{
     state::diff_bind::Resettable,
@@ -15,7 +16,7 @@ use slot_arithmetic::Epoch;
 use std::{
     borrow::{Borrow, BorrowMut},
     cell::{RefCell, RefMut},
-    collections::{BTreeMap, BTreeSet, HashSet},
+    collections::{BTreeMap, BTreeSet},
     ops::{Deref, DerefMut},
 };
 
@@ -41,20 +42,6 @@ impl<'a, T> BorrowMut<T> for RefMutAdapter<'a, T> {
     }
 }
 
-pub struct OwnedOptionWrapper(Option<pools::Row>);
-
-impl Borrow<Option<pools::Row>> for OwnedOptionWrapper {
-    fn borrow(&self) -> &Option<pools::Row> {
-        &self.0
-    }
-}
-
-impl BorrowMut<Option<pools::Row>> for OwnedOptionWrapper {
-    fn borrow_mut(&mut self) -> &mut Option<pools::Row> {
-        &mut self.0
-    }
-}
-
 pub struct RefMutAdapterMut<'a, T> {
     inner: &'a mut T,
 }
@@ -77,17 +64,18 @@ impl<'a, T> BorrowMut<T> for RefMutAdapterMut<'a, T> {
     }
 }
 
+// TODO: Add a field to MemoryStore for storing per-epoch snapshots as nested MemoryStores
 pub struct MemoryStore {
     tip: RefCell<Option<Point>>,
     epoch_progress: RefCell<Option<EpochTransitionProgress>>,
-    utxos: RefCell<BTreeMap<TransactionInput, Option<utxo::Value>>>,
-    accounts: RefCell<BTreeMap<StakeCredential, Option<accounts::Row>>>,
-    pools: RefCell<BTreeMap<PoolId, Option<pools::Row>>>,
+    utxos: RefCell<BTreeMap<TransactionInput, utxo::Value>>,
+    accounts: RefCell<BTreeMap<StakeCredential, accounts::Row>>,
+    pools: RefCell<BTreeMap<PoolId, pools::Row>>,
     pots: RefCell<pots::Row>,
-    slots: RefCell<BTreeMap<Slot, Option<slots::Row>>>,
-    dreps: RefCell<BTreeMap<StakeCredential, Option<dreps::Row>>>,
-    proposals: RefCell<BTreeMap<ComparableProposalId, Option<proposals::Row>>>,
-    cc_members: RefCell<BTreeMap<StakeCredential, Option<cc_members::Row>>>,
+    slots: RefCell<BTreeMap<Slot, slots::Row>>,
+    dreps: RefCell<BTreeMap<StakeCredential, dreps::Row>>,
+    proposals: RefCell<BTreeMap<ComparableProposalId, proposals::Row>>,
+    cc_members: RefCell<BTreeMap<StakeCredential, cc_members::Row>>,
     p_params: RefCell<BTreeMap<Epoch, ProtocolParameters>>,
     era_history: EraHistory,
 }
@@ -95,7 +83,7 @@ pub struct MemoryStore {
 impl MemoryStore {
     pub fn new(era_history: EraHistory) -> Self {
         MemoryStore {
-            tip: RefCell::new(None),
+            tip: RefCell::new(Some(Point::Origin)),
             epoch_progress: RefCell::new(None),
             utxos: RefCell::new(BTreeMap::new()),
             accounts: RefCell::new(BTreeMap::new()),
@@ -111,6 +99,7 @@ impl MemoryStore {
     }
 }
 
+// TODO: Implement Snapshot on MemoryStore (Currently returns hard-coded epoch 10)
 impl Snapshot for MemoryStore {
     fn epoch(&self) -> Epoch {
         Epoch::from(10)
@@ -129,11 +118,7 @@ impl ReadOnlyStore for MemoryStore {
         credential: &amaru_kernel::StakeCredential,
     ) -> Result<Option<amaru_ledger::store::columns::accounts::Row>, amaru_ledger::store::StoreError>
     {
-        Ok(self
-            .accounts
-            .borrow()
-            .get(credential)
-            .and_then(|opt| opt.clone()))
+        Ok(self.accounts.borrow().get(credential).cloned())
     }
 
     fn pool(
@@ -141,14 +126,14 @@ impl ReadOnlyStore for MemoryStore {
         pool: &amaru_kernel::PoolId,
     ) -> Result<Option<amaru_ledger::store::columns::pools::Row>, amaru_ledger::store::StoreError>
     {
-        Ok(self.pools.borrow().get(pool).and_then(|opt| opt.clone()))
+        Ok(self.pools.borrow().get(pool).cloned())
     }
 
     fn utxo(
         &self,
         input: &amaru_kernel::TransactionInput,
     ) -> Result<Option<amaru_kernel::TransactionOutput>, amaru_ledger::store::StoreError> {
-        Ok(self.utxos.borrow().get(input).and_then(|opt| opt.clone()))
+        Ok(self.utxos.borrow().get(input).cloned())
     }
 
     fn pots(&self) -> Result<amaru_ledger::summary::Pots, amaru_ledger::store::StoreError> {
@@ -171,11 +156,7 @@ impl ReadOnlyStore for MemoryStore {
             .utxos
             .borrow()
             .iter()
-            .filter_map(|(tx_input, opt_tx_output)| {
-                opt_tx_output
-                    .as_ref()
-                    .map(|tx_output| (tx_input.clone(), tx_output.clone()))
-            })
+            .map(|(tx_input, tx_output)| (tx_input.clone(), tx_output.clone()))
             .collect();
         Ok(utxo_vec.into_iter())
     }
@@ -196,7 +177,7 @@ impl ReadOnlyStore for MemoryStore {
             .slots
             .borrow()
             .iter()
-            .filter_map(|(slot, opt_row)| opt_row.as_ref().map(|row| (slot.clone(), row.clone())))
+            .map(|(slot, row)| (*slot, row.clone()))
             .collect();
 
         Ok(block_issuer_vec.into_iter())
@@ -218,9 +199,7 @@ impl ReadOnlyStore for MemoryStore {
             .pools
             .borrow()
             .iter()
-            .filter_map(|(pool_id, opt_row)| {
-                opt_row.as_ref().map(|row| (pool_id.clone(), row.clone()))
-            })
+            .map(|(pool_id, row)| (*pool_id, row.clone()))
             .collect();
 
         Ok(pool_vec.into_iter())
@@ -242,16 +221,13 @@ impl ReadOnlyStore for MemoryStore {
             .accounts
             .borrow()
             .iter()
-            .filter_map(|(stake_credential, opt_row)| {
-                opt_row
-                    .as_ref()
-                    .map(|row| (stake_credential.clone(), row.clone()))
-            })
+            .map(|(stake_credential, row)| (stake_credential.clone(), row.clone()))
             .collect();
 
         Ok(accounts_vec.into_iter())
     }
 
+    #[allow(refining_impl_trait)]
     #[allow(refining_impl_trait)]
     fn iter_dreps(
         &self,
@@ -268,11 +244,7 @@ impl ReadOnlyStore for MemoryStore {
             .dreps
             .borrow()
             .iter()
-            .filter_map(|(stake_credential, opt_row)| {
-                opt_row
-                    .as_ref()
-                    .map(|row| (stake_credential.clone(), row.clone()))
-            })
+            .map(|(stake_credential, row)| (stake_credential.clone(), row.clone()))
             .collect();
 
         Ok(dreps_vec.into_iter())
@@ -294,11 +266,7 @@ impl ReadOnlyStore for MemoryStore {
             .proposals
             .borrow()
             .iter()
-            .filter_map(|(proposal_id, opt_row)| {
-                opt_row
-                    .as_ref()
-                    .map(|row| (ProposalId::from((*proposal_id).clone()), row.clone()))
-            })
+            .map(|(proposal_id, row)| (ProposalId::from((*proposal_id).clone()), row.clone()))
             .collect();
 
         Ok(proposals_vec.into_iter())
@@ -345,7 +313,7 @@ impl<'a> TransactionalContext<'a> for MemoryTransactionalContext<'a> {
     ) -> Result<Lovelace, StoreError> {
         let mut accounts = self.store.accounts.borrow_mut();
         match accounts.get_mut(credential) {
-            Some(Some(account)) => {
+            Some(account) => {
                 account.rewards += deposit;
                 Ok(0)
             }
@@ -434,7 +402,7 @@ impl<'a> TransactionalContext<'a> for MemoryTransactionalContext<'a> {
                     if let Some(issuer) = issuer {
                         self.store.slots.borrow_mut().insert(
                             Slot::from(*slot),
-                            Some(amaru_ledger::store::columns::slots::Row::new(*issuer)),
+                            amaru_ledger::store::columns::slots::Row::new(*issuer),
                         );
                     }
                 }
@@ -443,15 +411,15 @@ impl<'a> TransactionalContext<'a> for MemoryTransactionalContext<'a> {
 
         // Utxos
         for (key, value) in add.utxo {
-            self.store.utxos.borrow_mut().insert(key, Some(value));
+            self.store.utxos.borrow_mut().insert(key, value);
         }
 
         // Pools
         for (pool_params, epoch) in add.pools {
             let mut pools = self.store.pools.borrow_mut();
-            let key = pool_params.id.clone();
+            let key = pool_params.id;
 
-            let updated_row = match pools.get(&key).cloned().flatten() {
+            let updated_row = match pools.get(&key).cloned() {
                 Some(mut row) => {
                     row.future_params.push((Some(pool_params.clone()), epoch));
                     row
@@ -462,54 +430,51 @@ impl<'a> TransactionalContext<'a> for MemoryTransactionalContext<'a> {
                 },
             };
 
-            pools.insert(key, Some(updated_row));
+            pools.insert(key, updated_row);
         }
 
         // Accounts
         for (key, value) in add.accounts {
             let (delegatee, drep, rewards, deposit) = value;
 
-            let mut row = self
-                .store
-                .accounts
-                .borrow()
-                .get(&key)
-                .cloned()
-                .flatten()
-                .unwrap_or_else(|| columns::accounts::Row {
-                    delegatee: None,
-                    drep: None,
-                    rewards: 0,
-                    deposit,
-                });
+            let mut row =
+                self.store
+                    .accounts
+                    .borrow()
+                    .get(&key)
+                    .cloned()
+                    .unwrap_or(columns::accounts::Row {
+                        delegatee: None,
+                        drep: None,
+                        rewards: 0,
+                        deposit,
+                    });
 
             match delegatee {
                 Resettable::Set(val) => row.delegatee = Some(val),
                 Resettable::Reset => row.delegatee = None,
-                Resettable::Unchanged => { /* keep existing */ }
+                Resettable::Unchanged => {}
             }
 
             match drep {
                 Resettable::Set(val) => row.drep = Some(val),
                 Resettable::Reset => row.drep = None,
-                Resettable::Unchanged => { /* keep existing */ }
+                Resettable::Unchanged => {}
             }
 
             if let Some(r) = rewards {
                 row.rewards = r;
             }
 
-            // Always overwrite deposit if that's your design
             row.deposit = deposit;
 
-            self.store.accounts.borrow_mut().insert(key, Some(row));
+            self.store.accounts.borrow_mut().insert(key, row);
         }
 
         // Dreps
         let dreps_vec: Vec<_> = add.dreps.collect();
 
-        // Track which DReps are freshly registered
-        let newly_registered: HashSet<_> = dreps_vec
+        let newly_registered: BTreeSet<_> = dreps_vec
             .iter()
             .filter_map(|(cred, (_, register, _))| {
                 if register.is_some() {
@@ -520,19 +485,18 @@ impl<'a> TransactionalContext<'a> for MemoryTransactionalContext<'a> {
             })
             .collect();
 
-        // Apply DRep rows to store
         for (credential, (anchor_resettable, register, _epoch)) in &dreps_vec {
             let mut dreps = self.store.dreps.borrow_mut();
-            let existing = dreps.get(credential).cloned().flatten();
+            let existing = dreps.get(credential).cloned();
 
-            let row = if let Some(mut row) = existing {
+            if let Some(mut row) = existing {
                 if let Some((deposit, registered_at)) = register {
                     row.registered_at = *registered_at;
                     row.deposit = *deposit;
                     row.last_interaction = None;
                 }
                 anchor_resettable.clone().set_or_reset(&mut row.anchor);
-                Some(row)
+                dreps.insert(credential.clone(), row);
             } else if let Some((deposit, registered_at)) = register {
                 let mut row = columns::dreps::Row {
                     anchor: None,
@@ -542,17 +506,14 @@ impl<'a> TransactionalContext<'a> for MemoryTransactionalContext<'a> {
                     previous_deregistration: None,
                 };
                 anchor_resettable.clone().set_or_reset(&mut row.anchor);
-                Some(row)
+                dreps.insert(credential.clone(), row);
             } else {
                 tracing::error!(
                     target: "store::dreps::add",
                     ?credential,
                     "add.register_no_deposit",
                 );
-                None
-            };
-
-            dreps.insert(credential.clone(), row);
+            }
         }
 
         // Update last_interaction for voting DReps, skipping newly registered ones
@@ -568,28 +529,35 @@ impl<'a> TransactionalContext<'a> for MemoryTransactionalContext<'a> {
                 .slot_to_epoch(slot)
                 .map_err(|err| StoreError::Internal(err.into()))?;
 
-            if let Some(Some(drep_row)) = self.store.dreps.borrow_mut().get_mut(&drep) {
+            if let Some(drep_row) = self.store.dreps.borrow_mut().get_mut(&drep) {
                 drep_row.last_interaction = Some(current_epoch);
             }
         }
+
         // cc_members
         for (key, value) in add.cc_members {
-            let row = match value {
-                Resettable::Set(cred) => Some(columns::cc_members::Row {
-                    hot_credential: Some(cred),
-                }),
-                Resettable::Reset => None,
-                Resettable::Unchanged => {
-                    self.store.cc_members.borrow().get(&key).cloned().flatten()
+            match value {
+                Resettable::Set(cred) => {
+                    let row = columns::cc_members::Row {
+                        hot_credential: Some(cred),
+                    };
+                    self.store.cc_members.borrow_mut().insert(key, row);
                 }
-            };
-
-            self.store.cc_members.borrow_mut().insert(key, row);
+                Resettable::Reset => {
+                    self.store.cc_members.borrow_mut().remove(&key);
+                }
+                Resettable::Unchanged => {
+                    if let Some(existing) = self.store.cc_members.borrow().get(&key).cloned() {
+                        self.store.cc_members.borrow_mut().insert(key, existing);
+                    }
+                }
+            }
         }
 
+        // proposals
         for (proposal_id, value) in add.proposals {
             let key = ComparableProposalId::from(proposal_id);
-            self.store.proposals.borrow_mut().insert(key, Some(value));
+            self.store.proposals.borrow_mut().insert(key, value);
         }
 
         // Delete removed data from each respective column in the store
@@ -600,12 +568,8 @@ impl<'a> TransactionalContext<'a> for MemoryTransactionalContext<'a> {
         for (pool_id, epoch) in remove.pools {
             let mut pools = self.store.pools.borrow_mut();
 
-            match pools.get_mut(&pool_id) {
-                Some(Some(row)) => {
-                    row.future_params.push((None, epoch));
-                }
-                Some(None) => {}
-                None => {}
+            if let Some(row) = pools.get_mut(&pool_id) {
+                row.future_params.push((None, epoch));
             }
         }
 
@@ -616,17 +580,14 @@ impl<'a> TransactionalContext<'a> for MemoryTransactionalContext<'a> {
         for (credential, pointer) in remove.dreps {
             let mut dreps = self.store.dreps.borrow_mut();
 
-            match dreps.get_mut(&credential) {
-                Some(Some(row)) => {
-                    row.previous_deregistration = Some(pointer);
-                }
-                Some(None) | None => {
-                    tracing::error!(
-                        target: "store::dreps::remove",
-                        ?credential,
-                        "remove.unknown_drep",
-                    );
-                }
+            if let Some(row) = dreps.get_mut(&credential) {
+                row.previous_deregistration = Some(pointer);
+            } else {
+                tracing::error!(
+                    target: "store::dreps::remove",
+                    ?credential,
+                    "remove.unknown_drep",
+                );
             }
         }
 
@@ -643,7 +604,7 @@ impl<'a> TransactionalContext<'a> for MemoryTransactionalContext<'a> {
 
         // Reset rewards data for accounts on withdrawal
         for key in withdrawals {
-            if let Some(Some(account)) = self.store.accounts.borrow_mut().get_mut(&key) {
+            if let Some(account) = self.store.accounts.borrow_mut().get_mut(&key) {
                 account.rewards = 0;
             }
         }
@@ -663,13 +624,26 @@ impl<'a> TransactionalContext<'a> for MemoryTransactionalContext<'a> {
     fn with_pools(&self, mut with: impl FnMut(pools::Iter<'_, '_>)) -> Result<(), StoreError> {
         let mut pools = self.store.pools.borrow_mut();
 
-        let iter = pools.iter_mut().map(|(k, v)| {
-            let key = k.clone();
+        let mut owned_pools = BTreeMap::<PoolId, pools::Row>::new();
+        std::mem::swap(pools.deref_mut(), &mut owned_pools);
+
+        let mut values: Vec<_> = owned_pools.into_iter().map(|(k, v)| (k, Some(v))).collect();
+
+        let iter = values.iter_mut().map(|(k, v)| {
+            let key = *k;
             let boxed: Box<dyn BorrowMut<Option<pools::Row>>> = Box::new(RefMutAdapterMut::new(v));
             (key, boxed)
         });
 
         with(Box::new(iter));
+
+        let mut reconstructed: BTreeMap<PoolId, pools::Row> = values
+            .into_iter()
+            .filter_map(|(k, v)| Some((k, v?)))
+            .collect();
+
+        std::mem::swap(pools.deref_mut(), &mut reconstructed);
+
         Ok(())
     }
 
@@ -677,15 +651,32 @@ impl<'a> TransactionalContext<'a> for MemoryTransactionalContext<'a> {
         &self,
         mut with: impl FnMut(accounts::Iter<'_, '_>),
     ) -> Result<(), amaru_ledger::store::StoreError> {
-        let mut pools = self.store.accounts.borrow_mut();
+        let mut accounts = self.store.accounts.borrow_mut();
 
-        let iter = pools.iter_mut().map(|(k, v)| {
+        let mut owned_accounts = BTreeMap::<StakeCredential, accounts::Row>::new();
+        std::mem::swap(accounts.deref_mut(), &mut owned_accounts);
+
+        let mut values: Vec<_> = owned_accounts
+            .into_iter()
+            .map(|(k, v)| (k, Some(v)))
+            .collect();
+
+        let iter = values.iter_mut().map(|(k, v)| {
             let key = k.clone();
             let boxed: Box<dyn BorrowMut<Option<accounts::Row>>> =
                 Box::new(RefMutAdapterMut::new(v));
             (key, boxed)
         });
+
         with(Box::new(iter));
+
+        let mut reconstructed = values
+            .into_iter()
+            .filter_map(|(k, v)| Some((k, v?)))
+            .collect();
+
+        std::mem::swap(accounts.deref_mut(), &mut reconstructed);
+
         Ok(())
     }
 
@@ -695,12 +686,26 @@ impl<'a> TransactionalContext<'a> for MemoryTransactionalContext<'a> {
     ) -> Result<(), amaru_ledger::store::StoreError> {
         let mut slots = self.store.slots.borrow_mut();
 
-        let iter = slots.iter_mut().map(|(k, v)| {
-            let key = k.clone();
+        let mut owned_slots = BTreeMap::<Slot, slots::Row>::new();
+        std::mem::swap(slots.deref_mut(), &mut owned_slots);
+
+        let mut values: Vec<_> = owned_slots.into_iter().map(|(k, v)| (k, Some(v))).collect();
+
+        let iter = values.iter_mut().map(|(k, v)| {
+            let key = *k;
             let boxed: Box<dyn BorrowMut<Option<slots::Row>>> = Box::new(RefMutAdapterMut::new(v));
             (key, boxed)
         });
+
         with(Box::new(iter));
+
+        let mut reconstructed: BTreeMap<Slot, slots::Row> = values
+            .into_iter()
+            .filter_map(|(k, v)| Some((k, v?)))
+            .collect();
+
+        std::mem::swap(slots.deref_mut(), &mut reconstructed);
+
         Ok(())
     }
 
@@ -710,12 +715,25 @@ impl<'a> TransactionalContext<'a> for MemoryTransactionalContext<'a> {
     ) -> Result<(), amaru_ledger::store::StoreError> {
         let mut utxos = self.store.utxos.borrow_mut();
 
-        let iter = utxos.iter_mut().map(|(k, v)| {
+        let mut owned_utxos = BTreeMap::<TransactionInput, TransactionOutput>::new();
+        std::mem::swap(utxos.deref_mut(), &mut owned_utxos);
+
+        let mut values: Vec<_> = owned_utxos.into_iter().map(|(k, v)| (k, Some(v))).collect();
+
+        let iter = values.iter_mut().map(|(k, v)| {
             let key = k.clone();
             let boxed: Box<dyn BorrowMut<Option<utxo::Value>>> = Box::new(RefMutAdapterMut::new(v));
             (key, boxed)
         });
+
         with(Box::new(iter));
+
+        let mut reconstructed: BTreeMap<TransactionInput, TransactionOutput> = values
+            .into_iter()
+            .filter_map(|(k, v)| Some((k, v?)))
+            .collect();
+
+        std::mem::swap(utxos.deref_mut(), &mut reconstructed);
         Ok(())
     }
 
@@ -725,12 +743,26 @@ impl<'a> TransactionalContext<'a> for MemoryTransactionalContext<'a> {
     ) -> Result<(), amaru_ledger::store::StoreError> {
         let mut dreps = self.store.dreps.borrow_mut();
 
-        let iter = dreps.iter_mut().map(|(k, v)| {
+        let mut owned_dreps = BTreeMap::<StakeCredential, dreps::Row>::new();
+        std::mem::swap(dreps.deref_mut(), &mut owned_dreps);
+
+        let mut values: Vec<_> = owned_dreps.into_iter().map(|(k, v)| (k, Some(v))).collect();
+
+        let iter = values.iter_mut().map(|(k, v)| {
             let key = k.clone();
             let boxed: Box<dyn BorrowMut<Option<dreps::Row>>> = Box::new(RefMutAdapterMut::new(v));
             (key, boxed)
         });
+
         with(Box::new(iter));
+
+        let mut reconstructed: BTreeMap<StakeCredential, dreps::Row> = values
+            .into_iter()
+            .filter_map(|(k, v)| Some((k, v?)))
+            .collect();
+
+        std::mem::swap(dreps.deref_mut(), &mut reconstructed);
+
         Ok(())
     }
 
@@ -740,13 +772,27 @@ impl<'a> TransactionalContext<'a> for MemoryTransactionalContext<'a> {
     ) -> Result<(), amaru_ledger::store::StoreError> {
         let mut proposals = self.store.proposals.borrow_mut();
 
-        let iter = proposals.iter_mut().map(|(k, v)| {
+        let mut owned = BTreeMap::<ComparableProposalId, proposals::Row>::new();
+        std::mem::swap(proposals.deref_mut(), &mut owned);
+
+        let mut values: Vec<_> = owned.into_iter().map(|(k, v)| (k, Some(v))).collect();
+
+        let iter = values.iter_mut().map(|(k, v)| {
             let key = ProposalId::from(k.clone());
             let boxed: Box<dyn BorrowMut<Option<proposals::Row>>> =
                 Box::new(RefMutAdapterMut::new(v));
             (key, boxed)
         });
+
         with(Box::new(iter));
+
+        let mut reconstructed: BTreeMap<ComparableProposalId, proposals::Row> = values
+            .into_iter()
+            .filter_map(|(k, v)| Some((k, v?)))
+            .collect();
+
+        std::mem::swap(proposals.deref_mut(), &mut reconstructed);
+
         Ok(())
     }
 }
@@ -754,21 +800,31 @@ impl<'a> TransactionalContext<'a> for MemoryTransactionalContext<'a> {
 impl Store for MemoryStore {
     type Transaction<'a> = MemoryTransactionalContext<'a>;
 
+    // TODO: Implement snapshots on MemoryStore (Placeholder used to pass bootstrap all stages test)
     fn snapshots(&self) -> Result<Vec<Epoch>, StoreError> {
         Ok(vec![Epoch::from(3)])
     }
-    fn next_snapshot(&self, _epoch: Epoch) -> Result<(), amaru_ledger::store::StoreError> {
-        Ok(())
+
+    // TODO: Implement next_snapshot on MemoryStore
+    fn next_snapshot(&self, _epoch: Epoch) -> Result<(), StoreError> {
+        Err(StoreError::Internal(
+            "next_snapshot not yet implemented on MemoryStore".into(),
+        ))
     }
+
     fn create_transaction(&self) -> Self::Transaction<'_> {
         MemoryTransactionalContext { store: self }
     }
 
-    fn tip(&self) -> Result<Point, amaru_ledger::store::StoreError> {
-        Ok(Point::Origin)
+    fn tip(&self) -> Result<Point, StoreError> {
+        self.tip
+            .borrow()
+            .clone()
+            .ok_or_else(|| StoreError::Internal("tip not yet set".into()))
     }
 }
 
+// TODO: Implement HistoricalStores on MemoryStore (currently returns a new empty MemoryStore)
 impl HistoricalStores for MemoryStore {
     fn for_epoch(&self, _epoch: Epoch) -> Result<impl Snapshot, amaru_ledger::store::StoreError> {
         let era_history: &EraHistory = NetworkName::Preprod.into();
@@ -786,7 +842,7 @@ mod tests {
         add_test_data_to_store, test_epoch_transition, test_read_account, test_read_drep,
         test_read_pool, test_read_proposal, test_read_utxo, test_refund_account,
         test_remove_account, test_remove_drep, test_remove_pool, test_remove_proposal,
-        test_remove_utxo,
+        test_remove_utxo, test_slot_updated,
     };
     use amaru_ledger::store::StoreError;
 
@@ -811,7 +867,7 @@ mod tests {
         // Transactional tests
         test_refund_account(&store, &seeded)?;
         test_epoch_transition(&store)?;
-        // TODO: Add slots iterator to validate slot is properly updated on save
+        test_slot_updated(&store, &seeded)?;
 
         // Validate removal tests
         test_remove_utxo(&store, &seeded)?;

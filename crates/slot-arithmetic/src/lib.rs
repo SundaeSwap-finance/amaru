@@ -311,7 +311,7 @@ impl<'b, C> Decode<'b, C> for Summary {
 }
 
 // A complete history of eras that have taken place.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct EraHistory {
     pub eras: Vec<Summary>,
 }
@@ -339,12 +339,6 @@ impl<'b, C> Decode<'b, C> for EraHistory {
             eras.push(era?);
         }
         Ok(EraHistory { eras })
-    }
-}
-
-impl Default for EraHistory {
-    fn default() -> Self {
-        Self { eras: Vec::new() }
     }
 }
 

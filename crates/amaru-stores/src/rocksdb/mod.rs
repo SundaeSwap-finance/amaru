@@ -620,7 +620,7 @@ mod tests {
         add_test_data_to_store, test_epoch_transition, test_read_account, test_read_drep,
         test_read_pool, test_read_proposal, test_read_utxo, test_refund_account,
         test_remove_account, test_remove_drep, test_remove_pool, test_remove_proposal,
-        test_remove_utxo,
+        test_remove_utxo, test_slot_updated,
     };
     use amaru_ledger::store::StoreError;
 
@@ -651,7 +651,7 @@ mod tests {
             // Transactional tests
             test_refund_account(&store, &seeded)?;
             test_epoch_transition(&store)?;
-            // TODO: Add slots iterator to validate slot is properly updated on save
+            test_slot_updated(&store, &seeded)?;
 
             // Validate removal tests
             test_remove_utxo(&store, &seeded)?;

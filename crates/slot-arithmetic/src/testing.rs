@@ -12,6 +12,7 @@ pub fn one_era() -> EraHistory {
                 slot: Slot(864000),
                 epoch: Epoch(10),
             },
+            #[allow(clippy::unwrap_used)]
             params: EraParams::new(86400, 1000).unwrap(),
         }],
     }

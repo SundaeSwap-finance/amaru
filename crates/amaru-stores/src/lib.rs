@@ -94,14 +94,6 @@ pub mod tests {
             .current()
     }
 
-    /*
-    fn generate_pots_row() -> pots::Row {
-        crate::store::pots::test::any_row()
-            .new_tree(&mut TestRunner::default())
-            .unwrap()
-            .current()
-    }*/
-
     fn generate_slot() -> Slot {
         any_slot()
             .new_tree(&mut TestRunner::default())
@@ -175,13 +167,13 @@ pub mod tests {
         pub drep_row: dreps::Row,
         pub proposal_key: ProposalId,
         pub proposal_row: proposals::Row,
+        pub slot: Slot,
+        pub slot_leader: PoolId,
         //pub cc_member_key: StakeCredential,
         //pub cc_member_row: cc_members::Row,
-        //pub slot_leader: PoolId,
-        //pub point: Point,
     }
 
-    pub fn add_test_data_to_store<'a>(
+    pub fn add_test_data_to_store(
         store: &impl Store,
         era_history: &EraHistory,
     ) -> Result<SeededData, StoreError> {
@@ -199,7 +191,7 @@ pub mod tests {
         let account_row = generate_account_row();
 
         let delegatee = match &account_row.delegatee {
-            Some(pool_id) => Resettable::Set(pool_id.clone()),
+            Some(pool_id) => Resettable::Set(*pool_id),
             None => Resettable::Reset,
         };
 
@@ -308,6 +300,8 @@ pub mod tests {
             drep_row,
             proposal_key,
             proposal_row,
+            slot,
+            slot_leader,
         })
     }
 
@@ -354,7 +348,7 @@ pub mod tests {
     }
 
     pub fn test_read_pool(store: &impl ReadOnlyStore, seeded: &SeededData) {
-        let pool_id = seeded.pool_params.id.clone();
+        let pool_id = seeded.pool_params.id;
         let stored_pool = store
             .pool(&pool_id)
             .expect("failed to read pool from store");
@@ -452,7 +446,7 @@ pub mod tests {
         );
     }
 
-    pub fn test_remove_utxo<'a>(store: &impl Store, seeded: &SeededData) -> Result<(), StoreError> {
+    pub fn test_remove_utxo(store: &impl Store, seeded: &SeededData) -> Result<(), StoreError> {
         let point = Point::Origin;
 
         let remove = Columns {
@@ -472,7 +466,7 @@ pub mod tests {
             remove,
             std::iter::empty(),
             BTreeSet::new(),
-        )?; // handle any error from save
+        )?;
         context.commit()?;
 
         assert_eq!(
@@ -484,10 +478,7 @@ pub mod tests {
         Ok(())
     }
 
-    pub fn test_remove_account<'a>(
-        store: &impl Store,
-        seeded: &SeededData,
-    ) -> Result<(), StoreError> {
+    pub fn test_remove_account(store: &impl Store, seeded: &SeededData) -> Result<(), StoreError> {
         let point = Point::Origin;
 
         let remove = Columns {
@@ -515,12 +506,12 @@ pub mod tests {
         Ok(())
     }
 
-    pub fn test_remove_pool<'a>(store: &impl Store, seeded: &SeededData) -> Result<(), StoreError> {
+    pub fn test_remove_pool(store: &impl Store, seeded: &SeededData) -> Result<(), StoreError> {
         let point = Point::Origin;
 
         let remove = Columns {
             utxo: std::iter::empty(),
-            pools: std::iter::once((seeded.pool_params.id.clone(), seeded.pool_epoch)),
+            pools: std::iter::once((seeded.pool_params.id, seeded.pool_epoch)),
             accounts: std::iter::empty(),
             dreps: std::iter::empty(),
             cc_members: std::iter::empty(),
@@ -551,13 +542,13 @@ pub mod tests {
         Ok(())
     }
 
-    pub fn test_remove_drep<'a>(store: &impl Store, seeded: &SeededData) -> Result<(), StoreError> {
+    pub fn test_remove_drep(store: &impl Store, seeded: &SeededData) -> Result<(), StoreError> {
         let point = Point::Origin;
 
         let drep_registered_at = store
             .iter_dreps()?
             .find(|(key, _)| *key == seeded.drep_key)
-            .and_then(|(_, row)| Some(row.registered_at))
+            .map(|(_, row)| row.registered_at)
             .ok_or_else(|| StoreError::Internal("DRep not found before removal".into()))?;
 
         let remove = Columns {
@@ -603,21 +594,16 @@ pub mod tests {
         Ok(())
     }
 
-    pub fn test_remove_proposal<'a>(
-        store: &impl Store,
-        seeded: &SeededData,
-    ) -> Result<(), StoreError> {
+    pub fn test_remove_proposal(store: &impl Store, seeded: &SeededData) -> Result<(), StoreError> {
         let point = Point::Origin;
 
         let proposal_id = seeded.proposal_key.clone();
 
-        // Ensure proposal is present before removal
         assert!(
             store.iter_proposals()?.any(|(key, _)| key == proposal_id),
             "Proposal not present before removal"
         );
 
-        // Remove the proposal
         let remove = Columns {
             utxo: std::iter::empty(),
             pools: std::iter::empty(),
@@ -648,10 +634,7 @@ pub mod tests {
         Ok(())
     }
 
-    pub fn test_refund_account<'a>(
-        store: &impl Store,
-        seeded: &SeededData,
-    ) -> Result<(), StoreError> {
+    pub fn test_refund_account(store: &impl Store, seeded: &SeededData) -> Result<(), StoreError> {
         let refund_amount = 100;
 
         let context = store.create_transaction();
@@ -680,9 +663,7 @@ pub mod tests {
             })?;
             context.commit()?;
 
-            let value = result
-                .ok_or_else(|| StoreError::Internal("Missing account after refund".into()))?;
-            value
+            result.ok_or_else(|| StoreError::Internal("Missing account after refund".into()))?
         };
 
         assert_eq!(
@@ -708,7 +689,7 @@ pub mod tests {
         Ok(())
     }
 
-    pub fn test_epoch_transition<'a>(store: &impl Store) -> Result<(), StoreError> {
+    pub fn test_epoch_transition(store: &impl Store) -> Result<(), StoreError> {
         use amaru_ledger::store::EpochTransitionProgress;
 
         let context = store.create_transaction();
@@ -728,6 +709,22 @@ pub mod tests {
             "Expected second transition from outdated state to fail"
         );
         context.commit()?;
+
+        Ok(())
+    }
+
+    pub fn test_slot_updated(store: &impl Store, seeded: &SeededData) -> Result<(), StoreError> {
+        let issuers: Vec<_> = store.iter_block_issuers()?.collect();
+
+        let found = issuers
+            .iter()
+            .any(|(slot, row)| *slot == seeded.slot && row.slot_leader == seeded.slot_leader);
+
+        assert!(
+            found,
+            "expected slot {:?} with issuer {:?} not found",
+            seeded.slot, seeded.slot_leader
+        );
 
         Ok(())
     }
