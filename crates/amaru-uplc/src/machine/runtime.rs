@@ -112,6 +112,16 @@ where
         Ok(integer)
     }
 
+    // Only CByteString arguments use this check. Results, BData, lengthOfByteString,
+    // signature keys, and hash-to-group domain separators remain unrestricted here.
+    fn unwrap_byte_string_operand(&self, value: &'a Value<'a, V>) -> Result<&'a [u8], MachineError<'a, V>> {
+        let bytes = value.unwrap_byte_string()?;
+        if self.costs.semantics.byte_string_operand_range_checks() && bytes.len() > 65_536 {
+            return Err(MachineError::runtime(RuntimeError::ByteStringOperandTooLarge(bytes.len())));
+        }
+        Ok(bytes)
+    }
+
     fn string_size<'s>(&self, string: &'s str) -> StringSize<'s> {
         if self.costs.semantics.costs_strings_by_utf8_bytes() {
             StringSize::Utf8Bytes(string)
@@ -150,8 +160,8 @@ where
                 Ok(value)
             }
             DefaultFunction::AppendByteString => {
-                let arg1 = runtime.args[0].unwrap_byte_string()?;
-                let arg2 = runtime.args[1].unwrap_byte_string()?;
+                let arg1 = self.unwrap_byte_string_operand(runtime.args[0])?;
+                let arg2 = self.unwrap_byte_string_operand(runtime.args[1])?;
 
                 let budget = self
                     .costs
@@ -212,7 +222,7 @@ where
                     digest::{Digest as _, consts::U32},
                 };
 
-                let arg1 = runtime.args[0].unwrap_byte_string()?;
+                let arg1 = self.unwrap_byte_string_operand(runtime.args[0])?;
 
                 let budget = self.costs.builtin_costs.get_cost(DefaultFunction::Blake2b_256, &[(&arg1).into()]);
 
@@ -278,7 +288,7 @@ where
             }
             DefaultFunction::ConsByteString => {
                 let arg1 = self.unwrap_bounded_integer(runtime.args[0])?;
-                let arg2 = runtime.args[1].unwrap_byte_string()?;
+                let arg2 = self.unwrap_byte_string_operand(runtime.args[1])?;
 
                 let budget =
                     self.costs.builtin_costs.get_cost(DefaultFunction::ConsByteString, &[arg1.into(), (&arg2).into()]);
@@ -349,7 +359,7 @@ where
                 Ok(value)
             }
             DefaultFunction::DecodeUtf8 => {
-                let arg1 = runtime.args[0].unwrap_byte_string()?;
+                let arg1 = self.unwrap_byte_string_operand(runtime.args[0])?;
 
                 let budget = self.costs.builtin_costs.get_cost(DefaultFunction::DecodeUtf8, &[(&arg1).into()]);
 
@@ -403,8 +413,8 @@ where
                 Ok(value)
             }
             DefaultFunction::EqualsByteString => {
-                let arg1 = runtime.args[0].unwrap_byte_string()?;
-                let arg2 = runtime.args[1].unwrap_byte_string()?;
+                let arg1 = self.unwrap_byte_string_operand(runtime.args[0])?;
+                let arg2 = self.unwrap_byte_string_operand(runtime.args[1])?;
 
                 let budget = self
                     .costs
@@ -514,7 +524,7 @@ where
                 if arg1 { Ok(arg2) } else { Ok(arg3) }
             }
             DefaultFunction::IndexByteString => {
-                let arg1 = runtime.args[0].unwrap_byte_string()?;
+                let arg1 = self.unwrap_byte_string_operand(runtime.args[0])?;
                 let arg2 = runtime.args[1].unwrap_integer()?;
 
                 let budget =
@@ -548,8 +558,8 @@ where
                 Ok(value)
             }
             DefaultFunction::LessThanByteString => {
-                let arg1 = runtime.args[0].unwrap_byte_string()?;
-                let arg2 = runtime.args[1].unwrap_byte_string()?;
+                let arg1 = self.unwrap_byte_string_operand(runtime.args[0])?;
+                let arg2 = self.unwrap_byte_string_operand(runtime.args[1])?;
 
                 let budget = self
                     .costs
@@ -565,8 +575,8 @@ where
                 Ok(value)
             }
             DefaultFunction::LessThanEqualsByteString => {
-                let arg1 = runtime.args[0].unwrap_byte_string()?;
-                let arg2 = runtime.args[1].unwrap_byte_string()?;
+                let arg1 = self.unwrap_byte_string_operand(runtime.args[0])?;
+                let arg2 = self.unwrap_byte_string_operand(runtime.args[1])?;
 
                 let budget = self
                     .costs
@@ -849,7 +859,7 @@ where
             DefaultFunction::Sha2_256 => {
                 use sha2::{Digest as _, Sha256};
 
-                let arg1 = runtime.args[0].unwrap_byte_string()?;
+                let arg1 = self.unwrap_byte_string_operand(runtime.args[0])?;
 
                 let budget = self.costs.builtin_costs.get_cost(DefaultFunction::Sha2_256, &[(&arg1).into()]);
 
@@ -866,7 +876,7 @@ where
             DefaultFunction::Sha3_256 => {
                 use sha3::{Digest as _, Sha3_256};
 
-                let arg1 = runtime.args[0].unwrap_byte_string()?;
+                let arg1 = self.unwrap_byte_string_operand(runtime.args[0])?;
 
                 let budget = self.costs.builtin_costs.get_cost(DefaultFunction::Sha3_256, &[(&arg1).into()]);
 
@@ -883,7 +893,7 @@ where
             DefaultFunction::SliceByteString => {
                 let arg1 = runtime.args[0].unwrap_integer()?;
                 let arg2 = runtime.args[1].unwrap_integer()?;
-                let arg3 = runtime.args[2].unwrap_byte_string()?;
+                let arg3 = self.unwrap_byte_string_operand(runtime.args[2])?;
 
                 let budget = self
                     .costs
@@ -1107,7 +1117,7 @@ where
                 use ed25519_dalek::{Signature, VerifyingKey};
 
                 let public_key = runtime.args[0].unwrap_byte_string()?;
-                let message = runtime.args[1].unwrap_byte_string()?;
+                let message = self.unwrap_byte_string_operand(runtime.args[1])?;
                 let signature = runtime.args[2].unwrap_byte_string()?;
 
                 let budget = self.costs.builtin_costs.get_cost(
@@ -1137,7 +1147,7 @@ where
                 use secp256k1::{Secp256k1, XOnlyPublicKey, schnorr::Signature};
 
                 let public_key = runtime.args[0].unwrap_byte_string()?;
-                let message = runtime.args[1].unwrap_byte_string()?;
+                let message = self.unwrap_byte_string_operand(runtime.args[1])?;
                 let signature = runtime.args[2].unwrap_byte_string()?;
 
                 let budget = self.costs.builtin_costs.get_cost(
@@ -1209,7 +1219,7 @@ where
                 Ok(value)
             }
             DefaultFunction::Bls12_381_G1_HashToGroup => {
-                let arg1 = runtime.args[0].unwrap_byte_string()?;
+                let arg1 = self.unwrap_byte_string_operand(runtime.args[0])?;
                 let arg2 = runtime.args[1].unwrap_byte_string()?;
 
                 let budget = self
@@ -1362,7 +1372,7 @@ where
                 Ok(value)
             }
             DefaultFunction::Bls12_381_G2_HashToGroup => {
-                let arg1 = runtime.args[0].unwrap_byte_string()?;
+                let arg1 = self.unwrap_byte_string_operand(runtime.args[0])?;
                 let arg2 = runtime.args[1].unwrap_byte_string()?;
 
                 let budget = self
@@ -1537,7 +1547,7 @@ where
             DefaultFunction::Keccak_256 => {
                 use sha3::{Digest as _, Keccak256};
 
-                let arg1 = runtime.args[0].unwrap_byte_string()?;
+                let arg1 = self.unwrap_byte_string_operand(runtime.args[0])?;
 
                 let budget = self.costs.builtin_costs.get_cost(DefaultFunction::Keccak_256, &[(&arg1).into()]);
 
@@ -1557,7 +1567,7 @@ where
                     digest::{Digest as _, consts::U28},
                 };
 
-                let arg1 = runtime.args[0].unwrap_byte_string()?;
+                let arg1 = self.unwrap_byte_string_operand(runtime.args[0])?;
 
                 let budget = self.costs.builtin_costs.get_cost(DefaultFunction::Blake2b_224, &[(&arg1).into()]);
 
@@ -1659,7 +1669,7 @@ where
             }
             DefaultFunction::ByteStringToInteger => {
                 let endianness = runtime.args[0].unwrap_bool()?;
-                let bytes = runtime.args[1].unwrap_byte_string()?;
+                let bytes = self.unwrap_byte_string_operand(runtime.args[1])?;
 
                 let budget = self
                     .costs
@@ -1679,8 +1689,8 @@ where
 
             DefaultFunction::AndByteString => {
                 let should_pad = runtime.args[0].unwrap_bool()?;
-                let left_bytes = runtime.args[1].unwrap_byte_string()?;
-                let right_bytes = runtime.args[2].unwrap_byte_string()?;
+                let left_bytes = self.unwrap_byte_string_operand(runtime.args[1])?;
+                let right_bytes = self.unwrap_byte_string_operand(runtime.args[2])?;
 
                 let budget = self.costs.builtin_costs.get_cost(
                     DefaultFunction::AndByteString,
@@ -1707,8 +1717,8 @@ where
             }
             DefaultFunction::OrByteString => {
                 let should_pad = runtime.args[0].unwrap_bool()?;
-                let left_bytes = runtime.args[1].unwrap_byte_string()?;
-                let right_bytes = runtime.args[2].unwrap_byte_string()?;
+                let left_bytes = self.unwrap_byte_string_operand(runtime.args[1])?;
+                let right_bytes = self.unwrap_byte_string_operand(runtime.args[2])?;
 
                 let budget = self.costs.builtin_costs.get_cost(
                     DefaultFunction::OrByteString,
@@ -1737,8 +1747,8 @@ where
             }
             DefaultFunction::XorByteString => {
                 let should_pad = runtime.args[0].unwrap_bool()?;
-                let left_bytes = runtime.args[1].unwrap_byte_string()?;
-                let right_bytes = runtime.args[2].unwrap_byte_string()?;
+                let left_bytes = self.unwrap_byte_string_operand(runtime.args[1])?;
+                let right_bytes = self.unwrap_byte_string_operand(runtime.args[2])?;
 
                 let budget = self.costs.builtin_costs.get_cost(
                     DefaultFunction::XorByteString,
@@ -1766,7 +1776,7 @@ where
                 Ok(value)
             }
             DefaultFunction::ComplementByteString => {
-                let bytes = runtime.args[0].unwrap_byte_string()?;
+                let bytes = self.unwrap_byte_string_operand(runtime.args[0])?;
 
                 let budget =
                     self.costs.builtin_costs.get_cost(DefaultFunction::ComplementByteString, &[(&bytes).into()]);
@@ -1778,7 +1788,7 @@ where
                 Ok(Value::byte_string(self.arena, result))
             }
             DefaultFunction::ReadBit => {
-                let bytes = runtime.args[0].unwrap_byte_string()?;
+                let bytes = self.unwrap_byte_string_operand(runtime.args[0])?;
                 let bit_index = runtime.args[1].unwrap_integer()?;
 
                 let budget =
@@ -2065,7 +2075,7 @@ where
                 Ok(Value::byte_string(self.arena, result))
             }
             DefaultFunction::CountSetBits => {
-                let bytes = runtime.args[0].unwrap_byte_string()?;
+                let bytes = self.unwrap_byte_string_operand(runtime.args[0])?;
 
                 let budget = self.costs.builtin_costs.get_cost(DefaultFunction::CountSetBits, &[(&bytes).into()]);
                 self.spend_budget(budget)?;
@@ -2075,7 +2085,7 @@ where
                 Ok(Value::integer(self.arena, result))
             }
             DefaultFunction::FindFirstSetBit => {
-                let bytes = runtime.args[0].unwrap_byte_string()?;
+                let bytes = self.unwrap_byte_string_operand(runtime.args[0])?;
 
                 let budget = self.costs.builtin_costs.get_cost(DefaultFunction::FindFirstSetBit, &[(&bytes).into()]);
                 self.spend_budget(budget)?;
@@ -2096,7 +2106,7 @@ where
             }
             DefaultFunction::Ripemd_160 => {
                 use ripemd::{Digest as _, Ripemd160};
-                let input = runtime.args[0].unwrap_byte_string()?;
+                let input = self.unwrap_byte_string_operand(runtime.args[0])?;
                 let budget = self.costs.builtin_costs.get_cost(DefaultFunction::Ripemd_160, &[(&input).into()]);
                 self.spend_budget(budget)?;
 

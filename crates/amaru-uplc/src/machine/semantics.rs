@@ -58,6 +58,12 @@ impl Semantics {
         matches!(self, Self::D | Self::E)
     }
 
+    /// Since protocol 11, selected builtins unlift bytestring operands through
+    /// Plutus' CByteString type, which allows at most 65536 bytes.
+    pub fn byte_string_operand_range_checks(&self) -> bool {
+        matches!(self, Self::D | Self::E)
+    }
+
     pub fn cons_byte_string_range_checks(&self) -> bool {
         matches!(self, Self::C | Self::E)
     }
