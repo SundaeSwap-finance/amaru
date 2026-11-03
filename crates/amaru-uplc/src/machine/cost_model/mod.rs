@@ -80,6 +80,18 @@ impl CostModel {
         Self::new(plutus_version, protocol_version, costs)
     }
 
+    /// Build the protocol 12 Plutus V4 cost model, with semantics G, from the parameter positions Plutus V4 shares with V3.
+    pub fn v4(costs: &[i64]) -> Self {
+        let semantics = Semantics::G;
+        let cost_map = ParamName::new_cost_map(PlutusVersion::V3, costs);
+        Self {
+            semantics,
+            case_on_constants: CaseOnConstants::new(protocol_version::PROTOCOL_VERSION_12),
+            machine_costs: MachineCosts::new(&cost_map),
+            builtin_costs: BuiltinCosts::new(&cost_map, semantics),
+        }
+    }
+
     pub fn v1() -> Self {
         Self::default_for(PlutusVersion::V1, protocol_version::DEFAULT)
     }
