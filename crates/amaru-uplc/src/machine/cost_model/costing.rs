@@ -198,7 +198,7 @@ impl Cost<4> for FourArguments {
 
         match self {
             FourArguments::Constant(c) => *c,
-            FourArguments::LinearInU(l) => u * l.slope + l.intercept,
+            FourArguments::LinearInU(l) => u.saturating_mul(l.slope).saturating_add(l.intercept),
         }
     }
 }

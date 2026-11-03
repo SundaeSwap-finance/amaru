@@ -279,8 +279,8 @@ impl BuiltinCosts {
                             coeff_02: param(DivideIntegerCpuC02),
                         })),
                     ),
-                    Semantics::E => TwoArguments::AboveAndBelowDiagonal(Box::new(TwoArguments::QuadraticInXAndY(
-                        TwoArgumentsQuadraticFunction {
+                    Semantics::E | Semantics::G => TwoArguments::AboveAndBelowDiagonal(Box::new(
+                        TwoArguments::QuadraticInXAndY(TwoArgumentsQuadraticFunction {
                             minimum: param(DivideIntegerCpuMinimum),
                             coeff_00: param(DivideIntegerCpuC00),
                             coeff_10: param(DivideIntegerCpuC10),
@@ -288,8 +288,8 @@ impl BuiltinCosts {
                             coeff_20: param(DivideIntegerCpuC20),
                             coeff_11: param(DivideIntegerCpuC11),
                             coeff_02: param(DivideIntegerCpuC02),
-                        },
-                    ))),
+                        }),
+                    )),
                 },
             },
             encode_utf8: Costing {
@@ -415,7 +415,7 @@ impl BuiltinCosts {
                         minimum: param(ModIntegerMemMinimum),
                         slope: param(ModIntegerMemSlope),
                     }),
-                    Semantics::C | Semantics::D | Semantics::E => TwoArguments::LinearInY(LinearSize {
+                    Semantics::C | Semantics::D | Semantics::E | Semantics::G => TwoArguments::LinearInY(LinearSize {
                         intercept: param(ModIntegerMemIntercept),
                         slope: param(ModIntegerMemSlope),
                     }),
@@ -446,8 +446,8 @@ impl BuiltinCosts {
                             coeff_02: param(ModIntegerCpuC02),
                         })),
                     ),
-                    Semantics::E => TwoArguments::AboveAndBelowDiagonal(Box::new(TwoArguments::QuadraticInXAndY(
-                        TwoArgumentsQuadraticFunction {
+                    Semantics::E | Semantics::G => TwoArguments::AboveAndBelowDiagonal(Box::new(
+                        TwoArguments::QuadraticInXAndY(TwoArgumentsQuadraticFunction {
                             minimum: param(ModIntegerCpuMinimum),
                             coeff_00: param(ModIntegerCpuC00),
                             coeff_10: param(ModIntegerCpuC10),
@@ -455,8 +455,8 @@ impl BuiltinCosts {
                             coeff_20: param(ModIntegerCpuC20),
                             coeff_11: param(ModIntegerCpuC11),
                             coeff_02: param(ModIntegerCpuC02),
-                        },
-                    ))),
+                        }),
+                    )),
                 },
             },
             multiply_integer: Costing {
@@ -469,7 +469,7 @@ impl BuiltinCosts {
                         intercept: param(MultiplyIntegerCpuIntercept),
                         slope: param(MultiplyIntegerCpuSlope),
                     }),
-                    Semantics::B | Semantics::C | Semantics::D | Semantics::E => {
+                    Semantics::B | Semantics::C | Semantics::D | Semantics::E | Semantics::G => {
                         TwoArguments::MultipliedSizes(MultipliedSizes {
                             intercept: param(MultiplyIntegerCpuIntercept),
                             slope: param(MultiplyIntegerCpuSlope),
@@ -495,7 +495,7 @@ impl BuiltinCosts {
                             slope: param(QuotientIntegerCpuSlope),
                         })),
                     ),
-                    Semantics::C | Semantics::E => TwoArguments::ConstAboveDiagonal(
+                    Semantics::C | Semantics::E | Semantics::G => TwoArguments::ConstAboveDiagonal(
                         param(QuotientIntegerCpuConstant),
                         Box::new(TwoArguments::QuadraticInXAndY(TwoArgumentsQuadraticFunction {
                             minimum: param(QuotientIntegerCpuMinimum),
@@ -516,7 +516,7 @@ impl BuiltinCosts {
                         minimum: param(RemainderIntegerMemMinimum),
                         slope: param(RemainderIntegerMemSlope),
                     }),
-                    Semantics::C | Semantics::D | Semantics::E => TwoArguments::LinearInY(LinearSize {
+                    Semantics::C | Semantics::D | Semantics::E | Semantics::G => TwoArguments::LinearInY(LinearSize {
                         intercept: param(RemainderIntegerMemIntercept),
                         slope: param(RemainderIntegerMemSlope),
                     }),
@@ -529,7 +529,7 @@ impl BuiltinCosts {
                             slope: param(RemainderIntegerCpuSlope),
                         })),
                     ),
-                    Semantics::C | Semantics::E => TwoArguments::ConstAboveDiagonal(
+                    Semantics::C | Semantics::E | Semantics::G => TwoArguments::ConstAboveDiagonal(
                         param(RemainderIntegerCpuConstant),
                         Box::new(TwoArguments::QuadraticInXAndY(TwoArgumentsQuadraticFunction {
                             minimum: param(RemainderIntegerCpuMinimum),
@@ -630,7 +630,7 @@ impl BuiltinCosts {
                         intercept: param(VerifyEd25519SignatureCpuIntercept),
                         slope: param(VerifyEd25519SignatureCpuSlope),
                     }),
-                    Semantics::B | Semantics::C | Semantics::D | Semantics::E => {
+                    Semantics::B | Semantics::C | Semantics::D | Semantics::E | Semantics::G => {
                         ThreeArguments::LinearInY(LinearSize {
                             intercept: param(VerifyEd25519SignatureCpuIntercept),
                             slope: param(VerifyEd25519SignatureCpuSlope),

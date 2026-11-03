@@ -55,6 +55,25 @@ impl CostModel {
         }
     }
 
+    /// Protocol-12 Plutus V4 costs with semantics G.
+    ///
+    /// Plutus 1.71 uses the same first 350 parameter positions as V3. Subsequent
+    /// positions price future builtins unavailable at protocol 12. This backend
+    /// maps the supported prefix, preserving the supplied coefficients and its
+    /// existing expensive defaults for missing parameters.
+    ///
+    /// Language availability, script decoding and ledger result validation are
+    /// the caller's responsibility. Existing V1-V3 selectors remain unchanged.
+    pub fn v4(costs: &[i64]) -> Self {
+        let semantics = Semantics::G;
+        let cost_map = ParamName::new_cost_map(PlutusVersion::V3, costs);
+        Self {
+            semantics,
+            machine_costs: MachineCosts::new(&cost_map),
+            builtin_costs: BuiltinCosts::new(&cost_map, semantics),
+        }
+    }
+
     /// Latest cost models for Plutus V1
     pub const DEFAULT_V1: [i64; 332] = amaru_kernel::protocol_parameters::DEFAULT_V1_COST_MODEL;
 

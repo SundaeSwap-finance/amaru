@@ -19,6 +19,7 @@ use amaru_kernel::{PlutusVersion, ProtocolVersion, protocol_version::PROTOCOL_VE
 ///
 /// - PlutusV1 & PlutusV2 semantics, which can be A, B or D;
 /// - PlutusV3 semantics, which can be C or E;
+/// - Explicit PlutusV4 evaluation uses G.
 #[derive(Debug, Clone, Copy, PartialOrd, Ord, PartialEq, Eq, Default)]
 pub enum Semantics {
     A,
@@ -27,6 +28,7 @@ pub enum Semantics {
     D,
     #[default]
     E,
+    G,
 }
 
 impl Semantics {
@@ -50,13 +52,13 @@ impl Semantics {
     }
 
     pub fn costs_strings_by_utf8_bytes(&self) -> bool {
-        matches!(self, Self::D | Self::E)
+        matches!(self, Self::D | Self::E | Self::G)
     }
 
     /// Since protocol 11, selected builtins unlift bytestring operands through
     /// Plutus' CByteString type, which allows at most 65536 bytes.
     pub fn byte_string_operand_range_checks(&self) -> bool {
-        matches!(self, Self::D | Self::E)
+        matches!(self, Self::D | Self::E | Self::G)
     }
 
     /// Semantics D/E unlift selected operands as signed 262144-bit CInteger.
@@ -65,6 +67,6 @@ impl Semantics {
     }
 
     pub fn cons_byte_string_range_checks(&self) -> bool {
-        matches!(self, Self::C | Self::E)
+        matches!(self, Self::C | Self::E | Self::G)
     }
 }
