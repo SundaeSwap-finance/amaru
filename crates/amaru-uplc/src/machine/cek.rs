@@ -21,6 +21,7 @@ use super::{
 use crate::{
     arena::Arena,
     binder::Eval,
+    builtin::DefaultFunction,
     constant::{Constant, Integer},
     data::PlutusData,
     machine::{env::Env, state::MachineState},
@@ -64,6 +65,19 @@ where
             remaining_budget: self.ex_budget,
             consumed_budget: self.initial_budget - self.ex_budget,
             logs: self.logs,
+        }
+    }
+
+    /// The builtin that `return_compute` of `value` calls, if returning it to the top frame saturates one.
+    pub fn saturated_builtin(&self, value: &'a Value<'a, V>) -> Option<DefaultFunction> {
+        match (self.frames.last()?, value) {
+            (Frame::Force, Value::Builtin(runtime)) => {
+                (runtime.needs_force() && runtime.is_ready()).then_some(runtime.fun)
+            }
+            (Frame::AwaitArg(Value::Builtin(runtime)), _) | (Frame::AwaitFunValue(_), Value::Builtin(runtime)) => {
+                (!runtime.needs_force() && runtime.is_one_argument_short()).then_some(runtime.fun)
+            }
+            _ => None,
         }
     }
 

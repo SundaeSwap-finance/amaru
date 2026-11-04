@@ -89,6 +89,10 @@ where
         self.forces < self.fun.force_count()
     }
 
+    pub fn is_one_argument_short(&self) -> bool {
+        self.args.len() + 1 == self.fun.arity()
+    }
+
     pub fn is_arrow(&self) -> bool {
         self.args.len() < self.fun.arity()
     }
