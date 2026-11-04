@@ -45,10 +45,15 @@ impl<'a, V> Program<'a, V>
 where
     V: Eval<'a>,
 {
-    /// Evaluate a program for the given `CostModel` and budget.
-    pub fn eval(&'a self, arena: &'a Arena, mut cost_model: CostModel, budget: ExBudget) -> EvalResult<'a, V> {
+    /// A machine for this program under `cost_model`, scrutinizing only the constants its version allows.
+    pub fn machine(&'a self, arena: &'a Arena, mut cost_model: CostModel, budget: ExBudget) -> Machine<'a, V> {
         cost_model.case_on_constants = cost_model.case_on_constants.for_program(self.version);
-        let mut machine = Machine::new(arena, budget, cost_model);
+        Machine::new(arena, budget, cost_model)
+    }
+
+    /// Evaluate a program for the given `CostModel` and budget.
+    pub fn eval(&'a self, arena: &'a Arena, cost_model: CostModel, budget: ExBudget) -> EvalResult<'a, V> {
+        let mut machine = self.machine(arena, cost_model, budget);
         let value = machine.run(self.term);
         let info = machine.info();
         EvalResult::new(value, info, arena)
