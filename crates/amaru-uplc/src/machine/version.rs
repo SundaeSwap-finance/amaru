@@ -28,6 +28,7 @@ impl Default for MachineVersion {
 impl MachineVersion {
     pub const V1_0_0: Self = Self::new(1, 0, 0);
     pub const V1_1_0: Self = Self::new(1, 1, 0);
+    pub const V1_2_0: Self = Self::new(1, 2, 0);
 
     pub const fn new(major: usize, minor: usize, patch: usize) -> Self {
         Self { major, minor, patch }
@@ -35,5 +36,9 @@ impl MachineVersion {
 
     pub fn is_constr_case_available(&self) -> bool {
         (self.major, self.minor) >= (1, 1)
+    }
+
+    pub fn is_data_case_available(&self) -> bool {
+        (self.major, self.minor) >= (1, 2)
     }
 }

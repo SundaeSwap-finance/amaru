@@ -46,7 +46,8 @@ where
     V: Eval<'a>,
 {
     /// Evaluate a program for the given `CostModel` and budget.
-    pub fn eval(&'a self, arena: &'a Arena, cost_model: CostModel, budget: ExBudget) -> EvalResult<'a, V> {
+    pub fn eval(&'a self, arena: &'a Arena, mut cost_model: CostModel, budget: ExBudget) -> EvalResult<'a, V> {
+        cost_model.case_on_constants = cost_model.case_on_constants.for_program(self.version);
         let mut machine = Machine::new(arena, budget, cost_model);
         let value = machine.run(self.term);
         let info = machine.info();

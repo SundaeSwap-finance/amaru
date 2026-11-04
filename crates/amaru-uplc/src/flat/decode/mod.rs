@@ -405,7 +405,10 @@ fn decode_constant_tag(d: &mut Decoder<'_>) -> Result<u8, FlatDecodeError> {
 
 #[cfg(test)]
 mod tests {
-    use amaru_kernel::{PROTOCOL_VERSION_10, protocol_version::PROTOCOL_VERSION_11};
+    use amaru_kernel::{
+        PROTOCOL_VERSION_10,
+        protocol_version::{PROTOCOL_VERSION_11, PROTOCOL_VERSION_12},
+    };
     use hex;
 
     use super::*;
@@ -524,6 +527,23 @@ mod tests {
     ) -> Result<(), FlatDecodeError> {
         let arena = Arena::new();
         let program = Program::new(&arena, MachineVersion::V1_1_0, Term::<DeBruijn>::error(&arena));
+        let bytes = crate::flat::encode::encode(program).expect("the program encodes");
+
+        let decoded = Arena::new();
+        decode::<DeBruijn>(&decoded, &bytes, plutus_version, protocol_version).map(|_| ())
+    }
+
+    #[test_case::test_case(PlutusVersion::V1, PROTOCOL_VERSION_11 => matches Err(FlatDecodeError::ProgramVersionNotAvailable { .. }) ; "V1 1.2 at protocol 11")]
+    #[test_case::test_case(PlutusVersion::V3, PROTOCOL_VERSION_11 => matches Err(FlatDecodeError::ProgramVersionNotAvailable { .. }) ; "V3 1.2 at protocol 11")]
+    #[test_case::test_case(PlutusVersion::V1, PROTOCOL_VERSION_12 => matches Ok(_) ; "V1 1.2 at protocol 12")]
+    #[test_case::test_case(PlutusVersion::V2, PROTOCOL_VERSION_12 => matches Ok(_) ; "V2 1.2 at protocol 12")]
+    #[test_case::test_case(PlutusVersion::V3, PROTOCOL_VERSION_12 => matches Ok(_) ; "V3 1.2 at protocol 12")]
+    fn program_version_1_2_0_is_available_from_protocol_12(
+        plutus_version: PlutusVersion,
+        protocol_version: amaru_kernel::ProtocolVersion,
+    ) -> Result<(), FlatDecodeError> {
+        let arena = Arena::new();
+        let program = Program::new(&arena, MachineVersion::V1_2_0, Term::<DeBruijn>::error(&arena));
         let bytes = crate::flat::encode::encode(program).expect("the program encodes");
 
         let decoded = Arena::new();

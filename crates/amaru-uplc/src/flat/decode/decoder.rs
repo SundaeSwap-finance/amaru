@@ -12,7 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use amaru_kernel::{PROTOCOL_VERSION_9, PlutusVersion, ProtocolVersion, protocol_version::PROTOCOL_VERSION_11};
+use amaru_kernel::{
+    PROTOCOL_VERSION_9, PlutusVersion, ProtocolVersion,
+    protocol_version::{PROTOCOL_VERSION_11, PROTOCOL_VERSION_12},
+};
 use bumpalo::collections::{String as BumpString, Vec as BumpVec};
 
 use super::FlatDecodeError;
@@ -49,6 +52,7 @@ impl<'a> Ctx<'a> {
             Semantics::A | Semantics::B => self.machine_version == MachineVersion::V1_0_0,
             Semantics::C | Semantics::D | Semantics::E | Semantics::G => {
                 matches!(self.machine_version, MachineVersion::V1_0_0 | MachineVersion::V1_1_0)
+                    || (self.machine_version == MachineVersion::V1_2_0 && self.protocol_version >= PROTOCOL_VERSION_12)
             }
         }
     }
