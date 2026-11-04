@@ -15,15 +15,17 @@
 use bumpalo::collections::Vec as BumpVec;
 
 use super::{
-    CostModel, ExBudget, MachineError, cost_model::StepKind, discharge, info::MachineInfo, runtime::Runtime,
-    value::Value,
+    CaseOnConstants, CostModel, ExBudget, MachineError, cost_model::StepKind, discharge, info::MachineInfo,
+    runtime::Runtime, value::Value,
 };
 use crate::{
     arena::Arena,
     binder::Eval,
-    constant::Constant,
+    constant::{Constant, Integer},
+    data::PlutusData,
     machine::{MachineVersion, context::Context, env::Env, state::MachineState},
     term::Term,
+    typ::Type,
 };
 
 pub struct Machine<'a> {
@@ -414,6 +416,22 @@ impl<'a> Machine<'a> {
                 fields.push(first_val);
                 fields.push(second_val);
                 Ok((0, 1, self.arena.alloc(fields)))
+            }
+            Constant::Data(PlutusData::Constr { tag, fields })
+                if self.costs.case_on_constants == CaseOnConstants::WithData
+                    && self.machine_version.is_data_case_available() =>
+            {
+                let tag = usize::try_from(*tag)
+                    .map_err(|_| MachineError::outside_usize_bounds(self.arena.alloc_integer(Integer::from(*tag))))?;
+                let items = BumpVec::from_iter_in(
+                    fields.iter().map(|field| Constant::data(self.arena, field)),
+                    self.arena.as_bump(),
+                );
+                let list = Constant::proto_list(self.arena, Type::data(self.arena), self.arena.alloc(items));
+
+                let mut fields = BumpVec::with_capacity_in(1, self.arena.as_bump());
+                fields.push(Value::con(self.arena, list));
+                Ok((tag, usize::MAX, self.arena.alloc(fields)))
             }
             _ => Err(MachineError::NonConstrScrutinized(Value::con(self.arena, constant))),
         }
